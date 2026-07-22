@@ -1,0 +1,107 @@
+section_id: catalog
+title: Catalog and products
+prerequisites: []
+
+options:
+  - option_id: product_variants
+    label: Product variants (size, color, etc.)
+    description: Support multiple SKUs per product with variant-specific pricing and inventory
+    eligibility_rules:
+      - rule_type: none
+    spec_bindings:
+      - json_path: domain_model.entities
+        operation: append_if_missing
+        value:
+          name: ProductVariant
+          description: A specific SKU variant of a product
+          fields:
+            - {name: sku, field_type: string, required: true}
+            - {name: price, field_type: money, required: true}
+            - {name: stock_quantity, field_type: integer, required: true}
+            - {name: attributes, field_type: json, required: false}
+          relationships:
+            - {target_entity: Product, relationship_type: many_to_one, foreign_key: product_id}
+          audit_fields: true
+          soft_delete: false
+      - json_path: api_model.endpoints
+        operation: append_if_missing
+        value:
+          method: GET
+          path: /api/v1/products/{id}/variants
+          summary: List all variants for a product
+          auth_required: false
+          response_entity: list[ProductVariant]
+          tags: [catalog]
+
+  - option_id: product_search
+    label: Product search and filters
+    description: Full-text search and faceted filtering on the product catalog
+    eligibility_rules:
+      - rule_type: none
+    spec_bindings:
+      - json_path: api_model.endpoints
+        operation: append_if_missing
+        value:
+          method: GET
+          path: /api/v1/products/search
+          summary: Search and filter products
+          auth_required: false
+          request_params:
+            - {name: q, param_type: query, field_type: string, required: false}
+            - {name: category_id, param_type: query, field_type: uuid, required: false}
+            - {name: min_price, param_type: query, field_type: decimal, required: false}
+            - {name: max_price, param_type: query, field_type: decimal, required: false}
+          response_entity: list[Product]
+          tags: [catalog, search]
+
+  - option_id: category_hierarchy
+    label: Category hierarchy
+    description: Nested product categories with unlimited depth
+    eligibility_rules:
+      - rule_type: none
+    spec_bindings:
+      - json_path: domain_model.entities
+        operation: append_if_missing
+        value:
+          name: Category
+          description: Hierarchical product category
+          fields:
+            - {name: name, field_type: string, required: true}
+            - {name: slug, field_type: string, required: true}
+            - {name: description, field_type: string, required: false}
+            - {name: image_url, field_type: string, required: false}
+          relationships:
+            - {target_entity: Category, relationship_type: many_to_one, foreign_key: parent_id}
+          audit_fields: true
+          soft_delete: true
+
+  - option_id: digital_products
+    label: Digital products
+    description: Support downloadable and virtual products (e-books, software licences)
+    eligibility_rules:
+      - rule_type: none
+    spec_bindings:
+      - json_path: domain_model.entities
+        operation: append_if_missing
+        value:
+          name: DigitalAsset
+          description: A downloadable file or licence key tied to a digital product
+          fields:
+            - {name: download_url, field_type: string, required: true, pii_class: none}
+            - {name: licence_key, field_type: string, required: false}
+            - {name: download_limit, field_type: integer, required: false}
+            - {name: expiry_days, field_type: integer, required: false}
+          relationships:
+            - {target_entity: Product, relationship_type: many_to_one, foreign_key: product_id}
+          audit_fields: true
+          soft_delete: false
+      - json_path: api_model.endpoints
+        operation: append_if_missing
+        value:
+          method: GET
+          path: /api/v1/orders/{orderId}/downloads
+          summary: Get download links for digital products in an order
+          auth_required: true
+          roles: [CUSTOMER]
+          response_entity: list[DigitalAsset]
+          tags: [orders, digital]

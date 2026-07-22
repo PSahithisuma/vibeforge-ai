@@ -1,0 +1,682 @@
+"""
+VibeForge — Generation Graph (Phase 0 — all stubs, fully wired)
+================================================================
+State machine: plan_node → scaffold_node → synthesize_node → assemble_node
+  → gate_node → reviewer_node → fixer_node (≤3) → escalation_gate_node
+  → gate_node (C6: re-enter after escalation) → deliver_node
+
+Contracts enforced here:
+  C2  — No process-memory state. Checkpointed in Postgres per node.
+  C3  — Long work is a job. Every node writes SSE events.
+  C5  — Fix loop hard-capped at MAX_FIX_ITERATIONS = 3.
+  C6  — Escalated output re-enters the sandbox gate (no trust shortcut).
+  C10 — Scaffold is templates only, zero LLM.
+"""
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any, Optional
+from uuid import uuid4
+
+from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
+
+MAX_FIX_ITERATIONS = 3   # Contract C5
+
+
+# ── Phase enum ────────────────────────────────────────────────────────────────
+
+class GenerationPhase(str, Enum):
+    """Phase values emitted in SSE events. Tests assert on .value strings."""
+    PLANNING    = "planning"
+    SCAFFOLDING = "scaffolding"
+    SYNTHESIZING = "synthesizing"
+    ASSEMBLING  = "assembling"
+    GATING      = "gating"
+    REVIEWING   = "reviewing"
+    FIXING      = "fixing"
+    ESCALATING  = "escalation"
+    DELIVERING  = "delivering"
+    DONE        = "done"
+    FAILED      = "failed"
+
+# Test-facing alias
+JobPhase = GenerationPhase
+
+
+class JobStatus(str, Enum):
+    QUEUED       = "queued"
+    RUNNING      = "running"
+    GATED        = "gated"
+    FIXING       = "fixing"
+    ESCALATED    = "escalated"
+    DELIVERED    = "delivered"
+    FAILED       = "failed"
+    PAUSED_HUMAN = "paused_human"
+
+
+# ── Sub-models ────────────────────────────────────────────────────────────────
+
+class GateStepResult(BaseModel):
+    step: str
+    passed: bool
+    duration_ms: int = 0
+    output: str = ""
+    coverage_pct: Optional[float] = None
+
+
+class GateResult(BaseModel):
+    passed: bool
+    steps: list[GateStepResult] = Field(default_factory=list)
+    failing_files: list[str] = Field(default_factory=list)
+    report_id: str = Field(default_factory=lambda: str(uuid4()))
+
+    @property
+    def failed_steps(self) -> list[GateStepResult]:
+        return [s for s in self.steps if not s.passed]
+
+
+class ModulePlan(BaseModel):
+    module_id: str
+    name: str
+    module_type: str                               # entity|repository|service|migration|test
+    dependencies: list[str] = Field(default_factory=list)
+    spec_slice: dict[str, Any] = Field(default_factory=dict)
+
+
+class FileMap(BaseModel):
+    module_id: str
+    files: dict[str, str] = Field(default_factory=dict)
+
+
+class FixPlan(BaseModel):
+    fix_plan_id: str = Field(default_factory=lambda: str(uuid4()))
+    files_to_fix: list[str] = Field(default_factory=list)
+    errors_by_file: dict[str, list[str]] = Field(default_factory=dict)
+    iteration: int = 1
+    escalation_recommended: bool = False
+    failure_classification: str = ""
+
+
+# ── Graph state ───────────────────────────────────────────────────────────────
+
+class GenerationState(BaseModel):
+    """
+    Complete job state. Serialised by LangGraph into the Postgres checkpointer.
+    Any worker can resume any job after a crash.
+    Contract C2: nothing lives in process memory.
+    """
+    job_id: str = Field(default_factory=lambda: str(uuid4()))
+    tenant_id: str = ""
+    project_id: str = ""
+    spec_id: str = ""
+    spec_version: int = 1
+    canonical_hash: str = ""
+
+    current_phase: GenerationPhase = GenerationPhase.PLANNING
+    job_status: JobStatus = JobStatus.QUEUED
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+
+    # Fix-loop — CONTRACT C5: hard ceiling
+    fix_iteration: int = 0                   # internal counter (1-indexed when active)
+    fix_count: int = 0                       # alias exposed to tests
+    max_fix_iterations: int = MAX_FIX_ITERATIONS
+    escalation_used: bool = False
+    escalation_approved: bool = False
+
+    # Node outputs
+    module_plan: list[ModulePlan] = Field(default_factory=list)
+    scaffold_files: dict[str, str] = Field(default_factory=dict)
+    file_maps: list[FileMap] = Field(default_factory=list)
+    assembled_files: dict[str, str] = Field(default_factory=dict)
+    assembly_conflicts: list[str] = Field(default_factory=list)
+    gate_result: Optional[GateResult] = None
+    fix_plan: Optional[FixPlan] = None
+
+    # Delivery
+    gitea_repo_url: Optional[str] = None
+    minio_bundle_key: Optional[str] = None
+    preview_url: Optional[str] = None
+    sbom_ref: Optional[str] = None
+
+    # Errors
+    error_message: Optional[str] = None
+
+    # SSE event log — plain dicts so LangGraph serialiser never chokes
+    events: list[dict[str, Any]] = Field(default_factory=list)
+
+    # Input helpers for stub nodes
+    spec_entity_names: list[str] = Field(default_factory=list)
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    # ── synthesized_modules alias (tests use this name) ───────────────────────
+    @property
+    def synthesized_modules(self) -> list[FileMap]:
+        return self.file_maps
+
+    # ── Safe JSON serialisation ───────────────────────────────────────────────
+    def model_dump_json(self, **kwargs) -> str:
+        """
+        Safely serialise state to JSON for the Postgres checkpointer.
+        Converts any JobEvent wrapper objects back to plain dicts first,
+        so Pydantic's serialiser never encounters an unknown type.
+        """
+        import json as _j
+
+        def _to_dict(e) -> dict:
+            if isinstance(e, dict):
+                return e
+            # JobEvent wrapper — convert back to dict
+            return {
+                "event_id": getattr(e, "event_id", ""),
+                "job_id":   getattr(e, "job_id", ""),
+                "node":     getattr(e, "node", ""),
+                "phase":    e.phase.value if hasattr(e, "phase") else "",
+                "payload":  getattr(e, "payload", {}),
+                "ts":       getattr(e, "ts", ""),
+            }
+
+        # Temporarily swap events to plain dicts for serialisation
+        original_events = self.events
+        self.events = [_to_dict(e) for e in original_events]
+        try:
+            d = self.model_dump(mode="json")
+        finally:
+            self.events = original_events  # restore wrappers
+
+        d.pop("model_config", None)
+        return _j.dumps(d, default=str)
+
+
+# ── SSE emission ──────────────────────────────────────────────────────────────
+
+def _emit(state: GenerationState, node: str, phase: GenerationPhase,
+          payload: dict[str, Any]) -> GenerationState:
+    """
+    Append a plain-dict event to state.events (feeds the SSE stream).
+    Stored as dicts so LangGraph's checkpoint serialiser never fails.
+    Contract C3: every node transition writes at least one event.
+    """
+    event: dict[str, Any] = {
+        "event_id": str(uuid4()),
+        "job_id": state.job_id,
+        "node": node,
+        "phase": phase.value,      # plain string — no enum wrapper in the dict
+        "payload": payload,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    state.events.append(event)
+    logger.info("[SSE] job=%s  node=%-20s  phase=%-14s  %s",
+                state.job_id[:8], node, phase.value, json.dumps(payload))
+    return state
+
+
+# ── JobEvent wrapper (post-graph, for test assertions) ────────────────────────
+
+class _PV:
+    """Wraps a phase string so .value works the same as a Pydantic Enum."""
+    __slots__ = ("value",)
+    def __init__(self, v: str): self.value = v
+    def __eq__(self, other):
+        return self.value == (other.value if hasattr(other, "value") else other)
+    def __hash__(self): return hash(self.value)
+    def __repr__(self): return f"Phase({self.value!r})"
+
+
+class JobEvent:
+    """
+    Thin wrapper around an event dict. Exposes .node and .phase.value
+    so tests can do {e.phase.value for e in state.events}.
+    """
+    __slots__ = ("event_id", "job_id", "node", "phase", "payload", "ts")
+
+    def __init__(self, d: dict):
+        self.event_id = d.get("event_id", "")
+        self.job_id   = d.get("job_id", "")
+        self.node     = d.get("node", "")
+        self.phase    = _PV(d.get("phase", ""))
+        self.payload  = d.get("payload", {})
+        self.ts       = d.get("ts", "")
+
+    def __repr__(self):
+        return f"JobEvent(node={self.node!r}, phase={self.phase.value!r})"
+
+
+def _wrap_events(state: GenerationState) -> GenerationState:
+    """Convert raw event dicts to JobEvent objects after ainvoke completes."""
+    state.events = [
+        JobEvent(e) if isinstance(e, dict) else e
+        for e in state.events
+    ]
+    return state
+
+
+# ── Node: plan_node ────────────────────────────────────────────────────────────
+
+def node_plan(state: GenerationState) -> dict:
+    """
+    Planner: frozen Spec IR → ordered module list.
+    Phase 0 stub — deterministic from entity names.
+    Phase 2: Qwen3-8B generates the DAG with cross-cutting sequencing.
+    """
+    state = _emit(state, "plan_node", GenerationPhase.PLANNING, {"status": "started"})
+    state.current_phase = GenerationPhase.PLANNING
+    state.job_status    = JobStatus.RUNNING
+    state.started_at    = datetime.now(timezone.utc).isoformat()
+
+    modules: list[ModulePlan] = []
+    if state.spec_entity_names:
+        for i, name in enumerate(state.spec_entity_names):
+            b = f"m{i*3}"
+            modules += [
+                ModulePlan(module_id=f"{b}_entity",  name=f"{name}Entity",
+                           module_type="entity",     dependencies=[]),
+                ModulePlan(module_id=f"{b}_repo",    name=f"{name}Repository",
+                           module_type="repository", dependencies=[f"{b}_entity"]),
+                ModulePlan(module_id=f"{b}_service", name=f"{name}Service",
+                           module_type="service",    dependencies=[f"{b}_repo"]),
+            ]
+        modules.append(ModulePlan(
+            module_id="migration", name="DatabaseMigrations",
+            module_type="migration", dependencies=[]))
+    else:
+        modules = [
+            ModulePlan(module_id="m1", name="CustomerService",
+                       module_type="service", dependencies=[]),
+        ]
+
+    state.module_plan = modules
+    state = _emit(state, "plan_node", GenerationPhase.PLANNING,
+                  {"status": "complete", "module_count": len(modules),
+                   "modules": [m.name for m in modules]})
+    return state.model_dump()
+
+
+# ── Node: scaffold_node ────────────────────────────────────────────────────────
+
+def node_scaffold(state: GenerationState) -> dict:
+    """
+    Scaffold: Copier template rendering. Zero LLM. Contract C10.
+    Phase 0 stub — representative file set.
+    """
+    state = _emit(state, "scaffold_node", GenerationPhase.SCAFFOLDING, {"status": "started"})
+    state.current_phase = GenerationPhase.SCAFFOLDING
+    state.scaffold_files = {
+        "pom.xml":                              "<!-- STUB: Maven build -->",
+        "Dockerfile":                           "# STUB: FROM eclipse-temurin:21-jre",
+        "docker-compose.yml":                   "# STUB: compose",
+        "src/main/resources/application.yml":   "# STUB: Spring config",
+        ".github/workflows/ci.yml":             "# STUB: CI workflow",
+    }
+    state = _emit(state, "scaffold_node", GenerationPhase.SCAFFOLDING,
+                  {"status": "complete", "file_count": len(state.scaffold_files)})
+    return state.model_dump()
+
+
+# ── Node: synthesize_node ──────────────────────────────────────────────────────
+
+def node_synthesize(state: GenerationState) -> dict:
+    """
+    Per-module code generation. Sequential in Phase 2.
+    Phase 0 stub — placeholder Java files per module.
+    Phase 2: Qwen2.5-Coder-32B with guided decoding → real file map.
+    """
+    state = _emit(state, "synthesize_node", GenerationPhase.SYNTHESIZING,
+                  {"status": "started", "total": len(state.module_plan)})
+    state.current_phase = GenerationPhase.SYNTHESIZING
+    file_maps: list[FileMap] = []
+    for idx, module in enumerate(state.module_plan):
+        state = _emit(state, "synthesize_node", GenerationPhase.SYNTHESIZING, {
+            "status": "synthesizing",
+            "module": module.name,
+            "index":  idx + 1,
+            "total":  len(state.module_plan),
+        })
+        pkg = module.name.lower()
+        file_maps.append(FileMap(
+            module_id=module.module_id,
+            files={
+                f"src/main/java/com/vibeforge/{pkg}/{module.name}.java":
+                    f"// STUB: {module.name}\npublic class {module.name} {{}}",
+                f"src/test/java/com/vibeforge/{pkg}/{module.name}Test.java":
+                    f"// STUB test: {module.name}",
+            },
+        ))
+    state.file_maps = file_maps
+    state = _emit(state, "synthesize_node", GenerationPhase.SYNTHESIZING,
+                  {"status": "complete", "module_count": len(file_maps)})
+    return state.model_dump()
+
+
+# ── Node: assemble_node ────────────────────────────────────────────────────────
+
+def node_assemble(state: GenerationState) -> dict:
+    """
+    Merge per-module file maps. Deterministic conflict detection.
+    Conflicts are FLAGGED in the GateReport — never silently overwritten.
+    """
+    state = _emit(state, "assemble_node", GenerationPhase.ASSEMBLING, {"status": "started"})
+    state.current_phase = GenerationPhase.ASSEMBLING
+
+    assembled: dict[str, str] = {}
+    conflicts: list[str] = []
+    assembled.update(state.scaffold_files)
+
+    for fm in state.file_maps:
+        for path, code in fm.files.items():
+            if path in assembled and path not in state.scaffold_files:
+                conflicts.append(path)
+                logger.warning("[ASSEMBLE] Conflict: %s", path)
+            else:
+                assembled[path] = code
+
+    state.assembled_files   = assembled
+    state.assembly_conflicts = conflicts
+
+    state = _emit(state, "assemble_node", GenerationPhase.ASSEMBLING, {
+        "status":    "complete" if not conflicts else "conflicts_detected",
+        "file_count": len(assembled),
+        "conflicts":  conflicts,
+    })
+    return state.model_dump()
+
+
+# ── Node: gate_node ────────────────────────────────────────────────────────────
+
+def node_gate(state: GenerationState) -> dict:
+    """
+    7-step QA gate. Phase 0 stub: always passes.
+    To exercise the fix loop, flip passed=False below.
+    Contract: gate output is machine-readable facts, not LLM opinion.
+    """
+    state = _emit(state, "gate_node", GenerationPhase.GATING, {
+        "status": "started", "iteration": state.fix_iteration})
+    state.current_phase = GenerationPhase.GATING
+    state.job_status    = JobStatus.GATED
+
+    steps = [
+        GateStepResult(step="compile",     passed=True, duration_ms=1100, output="BUILD SUCCESS"),
+        GateStepResult(step="unit_tests",  passed=True, duration_ms=3200, coverage_pct=71.4),
+        GateStepResult(step="migrations",  passed=True, duration_ms=800),
+        GateStepResult(step="api_smoke",   passed=True, duration_ms=2100),
+        GateStepResult(step="semgrep",     passed=True, duration_ms=5400),
+        GateStepResult(step="trivy_osv",   passed=True, duration_ms=4100, output="0 critical CVEs"),
+        GateStepResult(step="gitleaks",    passed=True, duration_ms=600,  output="No secrets found"),
+    ]
+    all_pass = all(s.passed for s in steps)
+    result = GateResult(
+        passed=all_pass,
+        steps=steps,
+        failing_files=[] if all_pass else ["src/main/java/com/vibeforge/stub/Stub.java"],
+    )
+    state.gate_result = result
+
+    state = _emit(state, "gate_node", GenerationPhase.GATING, {
+        "status":    "passed" if all_pass else "failed",
+        "iteration": state.fix_iteration,
+        "coverage":  71.4,
+        "report_id": result.report_id,
+    })
+    return state.model_dump()
+
+
+# ── Node: reviewer_node ────────────────────────────────────────────────────────
+
+def node_reviewer(state: GenerationState) -> dict:
+    """
+    Reads GateReport facts → writes FixPlan.
+    Phase 0 stub. Phase 2: Qwen3-8B reads the real report.
+    No vibes-based scoring — only machine-readable gate output.
+    """
+    state = _emit(state, "reviewer_node", GenerationPhase.REVIEWING, {"status": "started"})
+    state.current_phase = GenerationPhase.REVIEWING
+
+    gate = state.gate_result
+    if not gate or gate.passed:
+        return state.model_dump()
+
+    files_to_fix = gate.failing_files or ["src/main/java/com/vibeforge/stub/Stub.java"]
+    errors_by_file = {f: ["Compile/test failure — see gate report"] for f in files_to_fix}
+    next_iter      = state.fix_iteration + 1
+    esc_rec        = next_iter >= state.max_fix_iterations
+
+    state.fix_plan = FixPlan(
+        files_to_fix=files_to_fix,
+        errors_by_file=errors_by_file,
+        iteration=next_iter,
+        escalation_recommended=esc_rec,
+        failure_classification="capability_bound" if esc_rec else "mechanical",
+    )
+    state = _emit(state, "reviewer_node", GenerationPhase.REVIEWING, {
+        "status":        "complete",
+        "files_to_fix":  files_to_fix,
+        "next_iteration": next_iter,
+    })
+    return state.model_dump()
+
+
+# ── Node: fixer_node ──────────────────────────────────────────────────────────
+
+def node_fixer(state: GenerationState) -> dict:
+    """
+    Regenerates ONLY the files in the FixPlan.
+    CONTRACT C5: prompt ALWAYS contains the concrete GateReport errors.
+    Phase 0 stub. Phase 2: Qwen2.5-Coder-32B with real errors in-prompt.
+    """
+    iteration = state.fix_plan.iteration if state.fix_plan else state.fix_iteration + 1
+    state = _emit(state, "fixer_node", GenerationPhase.FIXING, {
+        "status":    "started",
+        "iteration": iteration,
+        "max":       state.max_fix_iterations,
+        # C5: gate errors always in this payload
+        "gate_errors": {
+            f: errs
+            for f, errs in (state.fix_plan.errors_by_file.items() if state.fix_plan else {})
+        },
+    })
+    state.current_phase = GenerationPhase.FIXING
+    state.job_status    = JobStatus.FIXING
+    state.fix_iteration = iteration
+    state.fix_count     = iteration   # keep test-facing alias in sync
+
+    if state.fix_plan:
+        for fpath in state.fix_plan.files_to_fix:
+            state.assembled_files[fpath] = (
+                f"// STUB FIXED (iteration {iteration}): {fpath}\n"
+                "// Gate errors were in this prompt — loop converges on facts."
+            )
+
+    state = _emit(state, "fixer_node", GenerationPhase.FIXING,
+                  {"status": "complete", "iteration": iteration})
+    return state.model_dump()
+
+
+# ── Node: escalation_gate_node ────────────────────────────────────────────────
+
+def node_escalation_gate(state: GenerationState) -> dict:
+    """
+    Classifies failure as capability-bound vs mechanical.
+    Phase 0 stub — pauses for human review.
+    Phase 3: Qwen3-8B classification + budget check + PII scan + commercial call.
+    CONTRACT C6: escalated output re-enters the gate (no trust shortcut).
+    CONTRACT C18: prompt scanned for PII/secrets before leaving perimeter.
+    """
+    state = _emit(state, "escalation_gate_node", GenerationPhase.ESCALATING,
+                  {"status": "evaluating", "fix_iteration": state.fix_iteration})
+    state.current_phase = GenerationPhase.ESCALATING
+    state.job_status    = JobStatus.PAUSED_HUMAN   # stub: no commercial call yet
+
+    state = _emit(state, "escalation_gate_node", GenerationPhase.ESCALATING,
+                  {"status": "paused_human", "reason": "Phase 0 stub — enable Phase 3 for commercial call"})
+    return state.model_dump()
+
+
+# ── Node: deliver_node ────────────────────────────────────────────────────────
+
+def node_deliver(state: GenerationState) -> dict:
+    """
+    Packages and delivers gate-passing artifacts.
+    CONTRACT C7: cache write happens only here (after full gate pass).
+    Phase 0 stub. Phase 2: Gitea push + MinIO bundle + Traefik preview.
+    """
+    state = _emit(state, "deliver_node", GenerationPhase.DELIVERING,
+                  {"status": "started", "file_count": len(state.assembled_files)})
+    state.current_phase  = GenerationPhase.DONE
+    state.gitea_repo_url = f"https://git.vibeforge.io/{state.tenant_id[:8]}/{state.project_id[:8]}"
+    state.minio_bundle_key = f"artifacts/{state.tenant_id}/{state.job_id}/bundle.zip"
+    state.preview_url    = f"https://preview-{state.job_id[:8]}.vibeforge.io"
+    state.sbom_ref       = f"sbom/{state.job_id}.cdx.json"
+    state.job_status     = JobStatus.DELIVERED
+    state.completed_at   = datetime.now(timezone.utc).isoformat()
+
+    state = _emit(state, "deliver_node", GenerationPhase.DELIVERING, {
+        "status":      "complete",
+        "preview_url": state.preview_url,
+        "gitea_url":   state.gitea_repo_url,
+        "file_count":  len(state.assembled_files),
+    })
+    return state.model_dump()
+
+
+def node_failed(state: GenerationState) -> dict:
+    state.job_status   = JobStatus.FAILED
+    state.completed_at = datetime.now(timezone.utc).isoformat()
+    state = _emit(state, "failed_node", GenerationPhase.FAILED,
+                  {"status": "failed", "error": state.error_message or ""})
+    return state.model_dump()
+
+
+# ── Routing functions ─────────────────────────────────────────────────────────
+
+def _route_gate(state: GenerationState) -> str:
+    gate = state.gate_result
+    if not gate:                                        return "failed_node"
+    if gate.passed:                                     return "deliver_node"
+    if state.fix_iteration < state.max_fix_iterations: return "reviewer_node"
+    return "escalation_gate_node"
+
+
+def _route_escalation(state: GenerationState) -> str:
+    if state.escalation_approved:
+        return "gate_node"    # CONTRACT C6: re-enter gate after escalation
+    return "__end__"
+
+
+# ── Graph builder ─────────────────────────────────────────────────────────────
+
+def build_generation_graph(checkpointer=None):
+    """
+    Build and compile the LangGraph StateGraph.
+    Pass a PostgresSaver checkpointer for production (Postgres C2 compliance).
+    Falls back to MemorySaver for Phase 0 tests.
+    """
+    from langgraph.graph import END, START, StateGraph
+
+    g = StateGraph(GenerationState)
+
+    # Register all nodes (names match what tests assert on: e.node == "plan_node")
+    g.add_node("plan_node",            node_plan)
+    g.add_node("scaffold_node",        node_scaffold)
+    g.add_node("synthesize_node",      node_synthesize)
+    g.add_node("assemble_node",        node_assemble)
+    g.add_node("gate_node",            node_gate)
+    g.add_node("reviewer_node",        node_reviewer)
+    g.add_node("fixer_node",           node_fixer)
+    g.add_node("escalation_gate_node", node_escalation_gate)
+    g.add_node("deliver_node",         node_deliver)
+    g.add_node("failed_node",          node_failed)
+
+    # Linear backbone
+    g.add_edge(START,               "plan_node")
+    g.add_edge("plan_node",         "scaffold_node")
+    g.add_edge("scaffold_node",     "synthesize_node")
+    g.add_edge("synthesize_node",   "assemble_node")
+    g.add_edge("assemble_node",     "gate_node")
+
+    # Gate routing
+    g.add_conditional_edges("gate_node", _route_gate, {
+        "reviewer_node":        "reviewer_node",
+        "deliver_node":         "deliver_node",
+        "escalation_gate_node": "escalation_gate_node",
+        "failed_node":          "failed_node",
+    })
+
+    # Fix loop: reviewer → fixer → back to gate
+    g.add_edge("reviewer_node", "fixer_node")
+    g.add_edge("fixer_node",    "gate_node")
+
+    # Escalation routing: re-enter gate (C6) or end
+    g.add_conditional_edges("escalation_gate_node", _route_escalation, {
+        "gate_node": "gate_node",
+        "__end__":   END,
+    })
+
+    g.add_edge("deliver_node", END)
+    g.add_edge("failed_node",  END)
+
+    return g.compile(checkpointer=checkpointer)
+
+
+# ── Public entry point (called by Arq workers and tests) ─────────────────────
+
+async def run_generation_job(
+    job_id: str,
+    tenant_id: str,
+    spec=None,
+    postgres_dsn: Optional[str] = None,
+    **kwargs,                              # absorbs legacy keyword args
+) -> GenerationState:
+    """
+    Async entry point.  Tests call:
+        await run_generation_job(job_id=..., tenant_id=..., spec=<ApplicationSpec>)
+    Production Arq workers call the same signature.
+
+    Returns a GenerationState whose .events list contains JobEvent wrappers
+    so tests can do: {e.node for e in state.events}, {e.phase.value ...}
+    """
+    from langgraph.checkpoint.memory import MemorySaver
+
+    if postgres_dsn:
+        try:
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+            async with AsyncPostgresSaver.from_conn_string(postgres_dsn) as cp:
+                await cp.setup()
+                return await _invoke(job_id, tenant_id, spec, cp)
+        except ImportError:
+            logger.warning("psycopg not installed — falling back to MemorySaver")
+
+    return await _invoke(job_id, tenant_id, spec, MemorySaver())
+
+
+async def _invoke(job_id: str, tenant_id: str, spec, checkpointer) -> GenerationState:
+    compiled = build_generation_graph(checkpointer=checkpointer)
+    config   = {"configurable": {"thread_id": job_id}}
+
+    entity_names: list[str] = []
+    project_id = ""
+    spec_id    = ""
+    spec_ver   = 1
+    can_hash   = ""
+
+    if spec is not None:
+        entity_names = [e.name for e in spec.domain_model.entities]
+        project_id   = str(getattr(spec, "project_id", ""))
+        spec_id      = str(getattr(spec, "spec_id", ""))
+        spec_ver     = getattr(spec, "spec_version", 1)
+        can_hash     = getattr(spec, "canonical_hash", "") or ""
+
+    initial = GenerationState(
+        job_id=job_id, tenant_id=tenant_id, project_id=project_id,
+        spec_id=spec_id, spec_version=spec_ver, canonical_hash=can_hash,
+        spec_entity_names=entity_names,
+    )
+
+    result = await compiled.ainvoke(initial.model_dump(), config=config)
+    final  = GenerationState.model_validate(result)
+    return _wrap_events(final)

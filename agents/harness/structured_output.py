@@ -273,10 +273,18 @@ _OriginalHarness = StructuredOutputHarness
 
 def StructuredOutputHarness(llm_client, **kwargs):  # noqa: N802  (override class name)
     """
-    Factory: returns _TestableHarness if llm_client is a coroutine function
-    (the test mock pattern), otherwise returns the production LiteLLM-backed harness.
+    Factory: returns _TestableHarness if llm_client is:
+      - a coroutine function (test mock pattern)
+      - a callable object with an async __call__ (OllamaClient, LiteLLMClient, _MockClient)
+    Otherwise returns the production LiteLLM-backed harness (expects litellm object).
     """
     import inspect
+    # Coroutine function (def async mock_llm(...))
     if inspect.iscoroutinefunction(llm_client):
+        return _TestableHarness(llm_client)
+    # Callable object with async __call__ (OllamaClient, LiteLLMClient, _MockClient)
+    if hasattr(llm_client, "__call__") and inspect.iscoroutinefunction(
+        getattr(llm_client.__class__, "__call__", None)
+    ):
         return _TestableHarness(llm_client)
     return _OriginalHarness(llm_client, **kwargs)

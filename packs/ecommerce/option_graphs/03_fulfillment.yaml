@@ -1,0 +1,174 @@
+section_id: fulfillment
+title: Fulfillment and delivery
+prerequisites: []
+
+options:
+  - option_id: order_management
+    label: Order management and lifecycle
+    description: Full order state machine — placed, confirmed, shipped, delivered, cancelled
+    eligibility_rules:
+      - rule_type: none
+    spec_bindings:
+      - json_path: domain_model.entities
+        operation: append_if_missing
+        value:
+          name: Order
+          description: A customer purchase order
+          fields:
+            - {name: order_number, field_type: string, required: true}
+            - {name: status, field_type: string, required: true}
+            - {name: subtotal, field_type: money, required: true}
+            - {name: tax, field_type: money, required: true}
+            - {name: shipping_fee, field_type: money, required: true}
+            - {name: total, field_type: money, required: true}
+            - {name: notes, field_type: string, required: false}
+          relationships:
+            - {target_entity: Customer, relationship_type: many_to_one, foreign_key: customer_id}
+            - {target_entity: Address, relationship_type: many_to_one, foreign_key: shipping_address_id}
+          audit_fields: true
+          soft_delete: false
+      - json_path: workflow_model.state_machines
+        operation: append_if_missing
+        value:
+          name: OrderLifecycle
+          entity: Order
+          state_field: status
+          initial_state: PLACED
+          states: [PLACED, CONFIRMED, PROCESSING, SHIPPED, OUT_FOR_DELIVERY, DELIVERED, CANCELLED, REFUNDED]
+          transitions:
+            - {from_state: PLACED, to_state: CONFIRMED, trigger: PAYMENT_CONFIRMED, actions: [send_confirmation_email, reserve_inventory]}
+            - {from_state: CONFIRMED, to_state: PROCESSING, trigger: WAREHOUSE_ACCEPTED}
+            - {from_state: PROCESSING, to_state: SHIPPED, trigger: SHIPMENT_CREATED, actions: [send_tracking_email]}
+            - {from_state: SHIPPED, to_state: OUT_FOR_DELIVERY, trigger: OUT_FOR_DELIVERY_SCAN}
+            - {from_state: OUT_FOR_DELIVERY, to_state: DELIVERED, trigger: DELIVERY_CONFIRMED, actions: [send_delivery_email, release_loyalty_points]}
+            - {from_state: PLACED, to_state: CANCELLED, trigger: CUSTOMER_CANCELLED, actions: [initiate_refund]}
+            - {from_state: CONFIRMED, to_state: CANCELLED, trigger: CUSTOMER_CANCELLED, actions: [initiate_refund, release_inventory]}
+            - {from_state: DELIVERED, to_state: REFUNDED, trigger: REFUND_APPROVED, actions: [process_refund]}
+      - json_path: api_model.endpoints
+        operation: append_if_missing
+        value:
+          method: GET
+          path: /api/v1/orders
+          summary: List orders for the authenticated customer
+          auth_required: true
+          roles: [CUSTOMER]
+          response_entity: list[Order]
+          tags: [orders]
+      - json_path: api_model.endpoints
+        operation: append_if_missing
+        value:
+          method: GET
+          path: /api/v1/orders/{id}
+          summary: Get order details
+          auth_required: true
+          roles: [CUSTOMER, ADMIN]
+          response_entity: Order
+          tags: [orders]
+      - json_path: api_model.endpoints
+        operation: append_if_missing
+        value:
+          method: POST
+          path: /api/v1/orders/{id}/cancel
+          summary: Cancel an order
+          auth_required: true
+          roles: [CUSTOMER, ADMIN]
+          tags: [orders]
+
+  - option_id: shipment_tracking
+    label: Shipment tracking integration
+    description: Real-time tracking via Shiprocket, Delhivery, or Bluedart
+    eligibility_rules:
+      - rule_type: requires_option
+        option_id: order_management
+    spec_bindings:
+      - json_path: domain_model.entities
+        operation: append_if_missing
+        value:
+          name: Shipment
+          description: Tracks the physical delivery of an order
+          fields:
+            - {name: tracking_number, field_type: string, required: true}
+            - {name: carrier, field_type: string, required: true}
+            - {name: carrier_tracking_url, field_type: string, required: false}
+            - {name: estimated_delivery_date, field_type: datetime, required: false}
+            - {name: last_status, field_type: string, required: true}
+          relationships:
+            - {target_entity: Order, relationship_type: many_to_one, foreign_key: order_id}
+          audit_fields: true
+          soft_delete: false
+      - json_path: api_model.endpoints
+        operation: append_if_missing
+        value:
+          method: GET
+          path: /api/v1/orders/{id}/tracking
+          summary: Get live shipment tracking for an order
+          auth_required: true
+          roles: [CUSTOMER, ADMIN]
+          response_entity: Shipment
+          tags: [orders, tracking]
+
+  - option_id: dark_store_inventory
+    label: Dark store / quick-commerce inventory model
+    description: Slot-based inventory per dark store hub for sub-30-minute delivery
+    eligibility_rules:
+      - rule_type: none
+    spec_bindings:
+      - json_path: domain_model.entities
+        operation: append_if_missing
+        value:
+          name: DarkStore
+          description: A fulfilment hub for quick-commerce delivery
+          fields:
+            - {name: name, field_type: string, required: true}
+            - {name: address, field_type: string, required: true}
+            - {name: latitude, field_type: decimal, required: true}
+            - {name: longitude, field_type: decimal, required: true}
+            - {name: service_radius_km, field_type: decimal, required: true}
+            - {name: is_active, field_type: boolean, required: true}
+          audit_fields: true
+          soft_delete: false
+      - json_path: domain_model.entities
+        operation: append_if_missing
+        value:
+          name: StoreInventory
+          description: Per-product stock level at a dark store
+          fields:
+            - {name: stock_quantity, field_type: integer, required: true}
+            - {name: reserved_quantity, field_type: integer, required: true}
+            - {name: reorder_threshold, field_type: integer, required: true}
+          relationships:
+            - {target_entity: DarkStore, relationship_type: many_to_one, foreign_key: store_id}
+            - {target_entity: Product, relationship_type: many_to_one, foreign_key: product_id}
+          audit_fields: true
+          soft_delete: false
+
+  - option_id: delivery_slots
+    label: Delivery slot scheduling
+    description: Let customers choose a 2-hour delivery window
+    eligibility_rules:
+      - rule_type: requires_option
+        option_id: dark_store_inventory
+    spec_bindings:
+      - json_path: domain_model.entities
+        operation: append_if_missing
+        value:
+          name: DeliverySlot
+          description: An available delivery time window
+          fields:
+            - {name: slot_date, field_type: datetime, required: true}
+            - {name: start_time, field_type: string, required: true}
+            - {name: end_time, field_type: string, required: true}
+            - {name: capacity, field_type: integer, required: true}
+            - {name: booked_count, field_type: integer, required: true}
+          relationships:
+            - {target_entity: DarkStore, relationship_type: many_to_one, foreign_key: store_id}
+          audit_fields: true
+          soft_delete: false
+      - json_path: api_model.endpoints
+        operation: append_if_missing
+        value:
+          method: GET
+          path: /api/v1/delivery-slots
+          summary: Get available delivery slots for a pincode
+          auth_required: false
+          tags: [delivery, slots]

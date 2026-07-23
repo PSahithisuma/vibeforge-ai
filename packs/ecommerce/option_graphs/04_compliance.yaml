@@ -1,0 +1,132 @@
+section_id: compliance
+title: Compliance and security
+prerequisites: []
+
+options:
+  - option_id: pci_dss_basic
+    label: PCI-DSS basic compliance
+    description: Minimum PCI controls — no PAN in logs, tokenization, secure headers
+    eligibility_rules:
+      - rule_type: requires_option
+        option_id: razorpay_integration
+    spec_bindings:
+      - json_path: compliance_model.frameworks
+        operation: append_if_missing
+        value: pci_dss
+      - json_path: compliance_model.rules
+        operation: append_if_missing
+        value:
+          rule_id: pci_no_pan_in_logs
+          framework: pci_dss
+          description: Card PAN must never appear in application logs
+          semgrep_rule_ref: pci/no-pan-in-logs
+          generation_constraint: Never log card numbers, CVV, or expiry dates. Use tokenized references only.
+          auto_enforced: true
+      - json_path: compliance_model.rules
+        operation: append_if_missing
+        value:
+          rule_id: pci_https_only
+          framework: pci_dss
+          description: All payment endpoints must use HTTPS only
+          semgrep_rule_ref: pci/https-only
+          generation_constraint: Reject HTTP requests on payment endpoints. Enforce HSTS.
+          auto_enforced: true
+      - json_path: security_model.security_headers
+        operation: set
+        value: true
+
+  - option_id: gst_compliance
+    label: GST e-invoicing (India)
+    description: Generate GST-compliant invoices with IRN and QR code via IRP
+    eligibility_rules:
+      - rule_type: none
+    spec_bindings:
+      - json_path: compliance_model.rules
+        operation: append_if_missing
+        value:
+          rule_id: gst_invoice_irn
+          framework: rbi
+          description: B2B invoices above INR 50,000 must be registered on IRP
+          semgrep_rule_ref: gst/irn-required
+          generation_constraint: Generate IRN for all B2B invoices. Store QR code payload.
+          auto_enforced: true
+      - json_path: domain_model.entities
+        operation: append_if_missing
+        value:
+          name: GSTInvoice
+          description: GST-compliant invoice with IRN
+          fields:
+            - {name: invoice_number, field_type: string, required: true}
+            - {name: irn, field_type: string, required: false}
+            - {name: qr_code, field_type: string, required: false}
+            - {name: gstin_buyer, field_type: string, required: false}
+            - {name: cgst_amount, field_type: money, required: true}
+            - {name: sgst_amount, field_type: money, required: true}
+            - {name: igst_amount, field_type: money, required: true}
+            - {name: total_tax, field_type: money, required: true}
+          relationships:
+            - {target_entity: Order, relationship_type: many_to_one, foreign_key: order_id}
+          audit_fields: true
+          soft_delete: false
+      - json_path: api_model.endpoints
+        operation: append_if_missing
+        value:
+          method: GET
+          path: /api/v1/orders/{id}/invoice
+          summary: Download GST invoice for an order
+          auth_required: true
+          roles: [CUSTOMER, ADMIN]
+          tags: [orders, gst]
+
+  - option_id: gdpr_data_privacy
+    label: GDPR data privacy controls
+    description: Right to erasure, data export, consent tracking
+    eligibility_rules:
+      - rule_type: none
+    spec_bindings:
+      - json_path: compliance_model.frameworks
+        operation: append_if_missing
+        value: gdpr
+      - json_path: compliance_model.rules
+        operation: append_if_missing
+        value:
+          rule_id: gdpr_pii_encryption
+          framework: gdpr
+          description: PII fields must be encrypted at rest
+          semgrep_rule_ref: gdpr/pii-field-encryption
+          generation_constraint: Fields marked pii_class=restricted must use field-level encryption.
+          auto_enforced: true
+      - json_path: api_model.endpoints
+        operation: append_if_missing
+        value:
+          method: POST
+          path: /api/v1/customers/me/data-export
+          summary: Request export of all personal data (GDPR right to portability)
+          auth_required: true
+          roles: [CUSTOMER]
+          tags: [gdpr, privacy]
+      - json_path: api_model.endpoints
+        operation: append_if_missing
+        value:
+          method: DELETE
+          path: /api/v1/customers/me
+          summary: Request account deletion (GDPR right to erasure)
+          auth_required: true
+          roles: [CUSTOMER]
+          tags: [gdpr, privacy]
+      - json_path: compliance_model.data_retention_days
+        operation: set
+        value: 90
+
+  - option_id: audit_logging
+    label: Immutable audit logging
+    description: Append-only audit trail for all sensitive operations
+    eligibility_rules:
+      - rule_type: none
+    spec_bindings:
+      - json_path: compliance_model.audit_logging
+        operation: set
+        value: true
+      - json_path: security_model.session_timeout_minutes
+        operation: set
+        value: 60

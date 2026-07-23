@@ -1,0 +1,136 @@
+section_id: payments
+title: Payments and checkout
+prerequisites: []
+
+options:
+  - option_id: razorpay_integration
+    label: Razorpay payment gateway
+    description: India's leading payment gateway — UPI, cards, netbanking, wallets
+    eligibility_rules:
+      - rule_type: none
+    spec_bindings:
+      - json_path: integration_model.integrations
+        operation: append_if_missing
+        value:
+          name: Razorpay
+          connector_ref: razorpay_v1
+          auth_mode: api_key
+          mock_server: true
+          environment_vars:
+            - RAZORPAY_KEY_ID
+            - RAZORPAY_KEY_SECRET
+          operations:
+            - {operation_id: create_order, name: Create payment order, description: Initiate a Razorpay order before checkout}
+            - {operation_id: verify_payment, name: Verify payment signature, description: Validate Razorpay webhook signature after payment}
+            - {operation_id: refund, name: Issue refund, description: Initiate a full or partial refund}
+      - json_path: domain_model.entities
+        operation: append_if_missing
+        value:
+          name: Payment
+          description: Records a payment attempt and its outcome
+          fields:
+            - {name: razorpay_order_id, field_type: string, required: true}
+            - {name: razorpay_payment_id, field_type: string, required: false}
+            - {name: amount, field_type: money, required: true}
+            - {name: currency, field_type: string, required: true}
+            - {name: status, field_type: string, required: true}
+            - {name: method, field_type: string, required: false}
+            - {name: failure_reason, field_type: string, required: false}
+          relationships:
+            - {target_entity: Order, relationship_type: many_to_one, foreign_key: order_id}
+          audit_fields: true
+          soft_delete: false
+      - json_path: api_model.endpoints
+        operation: append_if_missing
+        value:
+          method: POST
+          path: /api/v1/payments/initiate
+          summary: Initiate a payment for an order
+          auth_required: true
+          roles: [CUSTOMER]
+          request_body_entity: Order
+          response_entity: Payment
+          tags: [payments]
+      - json_path: api_model.endpoints
+        operation: append_if_missing
+        value:
+          method: POST
+          path: /api/v1/payments/webhook
+          summary: Handle Razorpay payment webhook
+          auth_required: false
+          tags: [payments, webhooks]
+
+  - option_id: stripe_integration
+    label: Stripe payment gateway
+    description: Global payments — cards, wallets, bank transfers
+    eligibility_rules:
+      - rule_type: conflicts_with
+        option_id: razorpay_integration
+    spec_bindings:
+      - json_path: integration_model.integrations
+        operation: append_if_missing
+        value:
+          name: Stripe
+          connector_ref: stripe_v1
+          auth_mode: api_key
+          mock_server: true
+          environment_vars:
+            - STRIPE_SECRET_KEY
+            - STRIPE_WEBHOOK_SECRET
+          operations:
+            - {operation_id: create_payment_intent, name: Create payment intent}
+            - {operation_id: confirm_payment, name: Confirm payment}
+            - {operation_id: refund, name: Issue refund}
+
+  - option_id: guest_checkout
+    label: Guest checkout (no account required)
+    description: Allow customers to complete purchase without creating an account
+    eligibility_rules:
+      - rule_type: none
+    spec_bindings:
+      - json_path: api_model.endpoints
+        operation: append_if_missing
+        value:
+          method: POST
+          path: /api/v1/checkout/guest
+          summary: Place an order as a guest without account creation
+          auth_required: false
+          tags: [checkout, guest]
+
+  - option_id: saved_payment_methods
+    label: Saved payment methods
+    description: Let customers save cards and UPI IDs for faster future checkout
+    eligibility_rules:
+      - rule_type: requires_option
+        option_id: razorpay_integration
+    spec_bindings:
+      - json_path: domain_model.entities
+        operation: append_if_missing
+        value:
+          name: SavedPaymentMethod
+          description: A tokenized payment method saved by the customer
+          fields:
+            - {name: token, field_type: string, required: true, pii_class: restricted}
+            - {name: method_type, field_type: string, required: true}
+            - {name: display_name, field_type: string, required: true}
+            - {name: is_default, field_type: boolean, required: true}
+          relationships:
+            - {target_entity: Customer, relationship_type: many_to_one, foreign_key: customer_id}
+          audit_fields: true
+          soft_delete: true
+
+  - option_id: emi_bnpl
+    label: EMI and Buy Now Pay Later
+    description: Offer installment payment options via Razorpay or NBFC partners
+    eligibility_rules:
+      - rule_type: requires_option
+        option_id: razorpay_integration
+    spec_bindings:
+      - json_path: api_model.endpoints
+        operation: append_if_missing
+        value:
+          method: GET
+          path: /api/v1/payments/emi-options
+          summary: Get available EMI plans for an order amount
+          auth_required: false
+          tags: [payments, emi]

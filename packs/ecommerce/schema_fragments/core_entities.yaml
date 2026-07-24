@@ -1,0 +1,714 @@
+# VibeForge — E-commerce schema fragments
+# Canonical entity sub-models for the e-commerce vertical.
+# The Synthesizer reads these as authoritative data model definitions.
+# Stack renderers convert them to the target language (Java/Python/C#/etc).
+# These are NOT generated — they are curated and versioned here.
+
+schema_fragment_id: ecommerce_core_v1
+vertical: ecommerce
+version: "1.0.0"
+
+# ── CATALOG ──────────────────────────────────────────────────────────────────
+
+fragments:
+
+  - fragment_id: catalog_product
+    domain: catalog
+    description: Core product entity — the thing being sold
+    entity:
+      name: Product
+      table_name: products
+      description: A product available for sale on the platform
+      fields:
+        - name: title
+          data_type: string
+          max_length: 255
+          nullable: false
+          description: Display name of the product
+          pii_class: none
+
+        - name: slug
+          data_type: string
+          max_length: 255
+          nullable: false
+          unique: true
+          description: URL-friendly identifier
+          pii_class: none
+
+        - name: description
+          data_type: text
+          nullable: true
+          description: Long-form product description (may contain HTML)
+          pii_class: none
+
+        - name: base_price
+          data_type: money
+          nullable: false
+          description: Base selling price before discounts
+          pii_class: none
+
+        - name: compare_at_price
+          data_type: money
+          nullable: true
+          description: Original price shown for strikethrough display
+          pii_class: none
+
+        - name: sku
+          data_type: string
+          max_length: 100
+          nullable: true
+          unique: true
+          description: Stock keeping unit
+          pii_class: none
+
+        - name: weight_grams
+          data_type: integer
+          nullable: true
+          description: Weight in grams for shipping calculations
+          pii_class: none
+
+        - name: is_active
+          data_type: boolean
+          nullable: false
+          default: true
+          description: Whether the product is visible in the catalog
+          pii_class: none
+
+        - name: is_digital
+          data_type: boolean
+          nullable: false
+          default: false
+          description: True for downloadable products with no shipping
+          pii_class: none
+
+        - name: tags
+          data_type: string_array
+          nullable: true
+          description: Searchable tags
+          pii_class: none
+
+        - name: metadata
+          data_type: json
+          nullable: true
+          description: Extensible key-value pairs for custom attributes
+          pii_class: none
+
+      relationships:
+        - from_entity: Product
+          to_entity: Category
+          relation: many_to_one
+          foreign_key: category_id
+          nullable: true
+
+      audit_fields: true
+      soft_delete: true
+      indexes:
+        - fields: [slug]
+          unique: true
+        - fields: [is_active, category_id]
+        - fields: [created_at]
+
+  - fragment_id: catalog_product_variant
+    domain: catalog
+    description: A specific variant of a product (size, color, material)
+    entity:
+      name: ProductVariant
+      table_name: product_variants
+      description: A purchasable variant of a product with its own SKU and price
+      fields:
+        - name: sku
+          data_type: string
+          max_length: 100
+          nullable: false
+          unique: true
+          pii_class: none
+
+        - name: title
+          data_type: string
+          max_length: 255
+          nullable: false
+          description: Variant display name e.g. "Red / XL"
+          pii_class: none
+
+        - name: price
+          data_type: money
+          nullable: false
+          description: Selling price for this specific variant
+          pii_class: none
+
+        - name: stock_quantity
+          data_type: integer
+          nullable: false
+          default: 0
+          description: Available units in stock
+          pii_class: none
+
+        - name: reserved_quantity
+          data_type: integer
+          nullable: false
+          default: 0
+          description: Units reserved in pending orders
+          pii_class: none
+
+        - name: variant_attributes
+          data_type: json
+          nullable: false
+          description: Key-value pairs e.g. {"color":"red","size":"XL"}
+          pii_class: none
+
+        - name: barcode
+          data_type: string
+          max_length: 100
+          nullable: true
+          pii_class: none
+
+        - name: weight_grams
+          data_type: integer
+          nullable: true
+          pii_class: none
+
+        - name: image_url
+          data_type: string
+          nullable: true
+          pii_class: none
+
+      relationships:
+        - from_entity: ProductVariant
+          to_entity: Product
+          relation: many_to_one
+          foreign_key: product_id
+          nullable: false
+          on_delete: CASCADE
+
+      audit_fields: true
+      soft_delete: true
+      indexes:
+        - fields: [sku]
+          unique: true
+        - fields: [product_id, is_active]
+
+  - fragment_id: catalog_category
+    domain: catalog
+    description: Hierarchical product category (up to 3 levels deep)
+    entity:
+      name: Category
+      table_name: categories
+      description: A category for organizing products in a tree structure
+      fields:
+        - name: name
+          data_type: string
+          max_length: 150
+          nullable: false
+          pii_class: none
+
+        - name: slug
+          data_type: string
+          max_length: 150
+          nullable: false
+          unique: true
+          pii_class: none
+
+        - name: description
+          data_type: text
+          nullable: true
+          pii_class: none
+
+        - name: image_url
+          data_type: string
+          nullable: true
+          pii_class: none
+
+        - name: display_order
+          data_type: integer
+          nullable: false
+          default: 0
+          pii_class: none
+
+        - name: is_active
+          data_type: boolean
+          nullable: false
+          default: true
+          pii_class: none
+
+        - name: parent_category_id
+          data_type: uuid
+          nullable: true
+          description: Null for root categories
+          pii_class: none
+
+        - name: level
+          data_type: integer
+          nullable: false
+          default: 0
+          description: 0=root, 1=sub, 2=leaf — enforced to max 3
+          pii_class: none
+
+      relationships:
+        - from_entity: Category
+          to_entity: Category
+          relation: many_to_one
+          foreign_key: parent_category_id
+          nullable: true
+          description: Self-referential for tree structure
+
+      audit_fields: true
+      soft_delete: true
+      indexes:
+        - fields: [slug]
+          unique: true
+        - fields: [parent_category_id]
+        - fields: [is_active, display_order]
+
+# ── CART ─────────────────────────────────────────────────────────────────────
+
+  - fragment_id: cart_cart
+    domain: cart
+    description: Shopping cart — persists across sessions
+    entity:
+      name: Cart
+      table_name: carts
+      description: A shopping session containing items before checkout
+      fields:
+        - name: session_token
+          data_type: string
+          max_length: 128
+          nullable: true
+          description: For guest carts — links to browser session
+          pii_class: none
+
+        - name: status
+          data_type: string
+          max_length: 20
+          nullable: false
+          default: ACTIVE
+          description: ACTIVE | CHECKED_OUT | ABANDONED | MERGED
+          pii_class: none
+
+        - name: currency
+          data_type: string
+          max_length: 3
+          nullable: false
+          default: INR
+          pii_class: none
+
+        - name: subtotal
+          data_type: money
+          nullable: false
+          default: 0
+          description: Sum of line item totals before tax and shipping
+          pii_class: none
+
+        - name: expires_at
+          data_type: datetime
+          nullable: true
+          description: For guest carts — TTL for cleanup
+          pii_class: none
+
+        - name: metadata
+          data_type: json
+          nullable: true
+          description: Coupon codes applied, source channel, etc.
+          pii_class: none
+
+      relationships:
+        - from_entity: Cart
+          to_entity: Customer
+          relation: many_to_one
+          foreign_key: customer_id
+          nullable: true
+          description: Null for guest carts
+
+      audit_fields: true
+      soft_delete: false
+      indexes:
+        - fields: [session_token]
+        - fields: [customer_id, status]
+        - fields: [expires_at]
+
+  - fragment_id: cart_cart_item
+    domain: cart
+    description: A single line item inside a cart
+    entity:
+      name: CartItem
+      table_name: cart_items
+      description: One product variant and quantity in a cart
+      fields:
+        - name: quantity
+          data_type: integer
+          nullable: false
+          minimum: 1
+          pii_class: none
+
+        - name: unit_price
+          data_type: money
+          nullable: false
+          description: Price at time of adding to cart — snapshot
+          pii_class: none
+
+        - name: line_total
+          data_type: money
+          nullable: false
+          description: quantity × unit_price
+          pii_class: none
+
+      relationships:
+        - from_entity: CartItem
+          to_entity: Cart
+          relation: many_to_one
+          foreign_key: cart_id
+          nullable: false
+          on_delete: CASCADE
+
+        - from_entity: CartItem
+          to_entity: ProductVariant
+          relation: many_to_one
+          foreign_key: product_variant_id
+          nullable: false
+
+      audit_fields: false
+      soft_delete: false
+      indexes:
+        - fields: [cart_id]
+        - fields: [cart_id, product_variant_id]
+          unique: true
+
+# ── ORDER ─────────────────────────────────────────────────────────────────────
+
+  - fragment_id: order_order
+    domain: orders
+    description: A confirmed customer purchase
+    entity:
+      name: Order
+      table_name: orders
+      description: A completed purchase — immutable record of what was bought
+      fields:
+        - name: order_number
+          data_type: string
+          max_length: 50
+          nullable: false
+          unique: true
+          description: Human-readable order ID e.g. ORD-20240712-00001
+          pii_class: none
+
+        - name: status
+          data_type: string
+          max_length: 30
+          nullable: false
+          default: PLACED
+          description: >
+            PLACED | CONFIRMED | PROCESSING | SHIPPED |
+            OUT_FOR_DELIVERY | DELIVERED | CANCELLED | REFUNDED
+          pii_class: none
+
+        - name: currency
+          data_type: string
+          max_length: 3
+          nullable: false
+          default: INR
+          pii_class: none
+
+        - name: subtotal
+          data_type: money
+          nullable: false
+          pii_class: none
+
+        - name: discount_total
+          data_type: money
+          nullable: false
+          default: 0
+          pii_class: none
+
+        - name: tax_total
+          data_type: money
+          nullable: false
+          default: 0
+          pii_class: none
+
+        - name: shipping_total
+          data_type: money
+          nullable: false
+          default: 0
+          pii_class: none
+
+        - name: grand_total
+          data_type: money
+          nullable: false
+          pii_class: none
+
+        - name: notes
+          data_type: text
+          nullable: true
+          pii_class: none
+
+        - name: cancelled_at
+          data_type: datetime
+          nullable: true
+          pii_class: none
+
+        - name: cancellation_reason
+          data_type: string
+          nullable: true
+          pii_class: none
+
+        - name: placed_at
+          data_type: datetime
+          nullable: false
+          pii_class: none
+
+      relationships:
+        - from_entity: Order
+          to_entity: Customer
+          relation: many_to_one
+          foreign_key: customer_id
+          nullable: true
+          description: Null for guest orders
+
+        - from_entity: Order
+          to_entity: Address
+          relation: many_to_one
+          foreign_key: shipping_address_id
+          nullable: false
+
+      audit_fields: true
+      soft_delete: false
+      indexes:
+        - fields: [order_number]
+          unique: true
+        - fields: [customer_id, status]
+        - fields: [placed_at]
+        - fields: [status]
+
+  - fragment_id: order_order_item
+    domain: orders
+    description: A single line item inside an order — immutable snapshot
+    entity:
+      name: OrderItem
+      table_name: order_items
+      description: One product variant purchased in an order — price snapshot
+      fields:
+        - name: product_title
+          data_type: string
+          nullable: false
+          description: Snapshot of product title at time of purchase
+          pii_class: none
+
+        - name: variant_title
+          data_type: string
+          nullable: false
+          description: Snapshot of variant title at time of purchase
+          pii_class: none
+
+        - name: sku
+          data_type: string
+          nullable: false
+          description: Snapshot of SKU at time of purchase
+          pii_class: none
+
+        - name: quantity
+          data_type: integer
+          nullable: false
+          minimum: 1
+          pii_class: none
+
+        - name: unit_price
+          data_type: money
+          nullable: false
+          description: Price paid per unit — immutable after order placed
+          pii_class: none
+
+        - name: discount_amount
+          data_type: money
+          nullable: false
+          default: 0
+          pii_class: none
+
+        - name: tax_amount
+          data_type: money
+          nullable: false
+          default: 0
+          pii_class: none
+
+        - name: line_total
+          data_type: money
+          nullable: false
+          pii_class: none
+
+      relationships:
+        - from_entity: OrderItem
+          to_entity: Order
+          relation: many_to_one
+          foreign_key: order_id
+          nullable: false
+          on_delete: CASCADE
+
+        - from_entity: OrderItem
+          to_entity: ProductVariant
+          relation: many_to_one
+          foreign_key: product_variant_id
+          nullable: true
+          description: Nullable — variant may be deleted after order
+
+      audit_fields: false
+      soft_delete: false
+      indexes:
+        - fields: [order_id]
+
+# ── INVENTORY ─────────────────────────────────────────────────────────────────
+
+  - fragment_id: inventory_stock
+    domain: inventory
+    description: Real-time stock levels per variant (and optionally per location)
+    entity:
+      name: Inventory
+      table_name: inventory
+      description: Stock level for one product variant at one location
+      fields:
+        - name: quantity_on_hand
+          data_type: integer
+          nullable: false
+          default: 0
+          description: Physical units at this location
+          pii_class: none
+
+        - name: quantity_reserved
+          data_type: integer
+          nullable: false
+          default: 0
+          description: Units held for pending orders
+          pii_class: none
+
+        - name: quantity_available
+          data_type: integer
+          nullable: false
+          description: quantity_on_hand - quantity_reserved (computed)
+          pii_class: none
+
+        - name: reorder_point
+          data_type: integer
+          nullable: false
+          default: 5
+          description: Alert threshold for low stock
+          pii_class: none
+
+        - name: reorder_quantity
+          data_type: integer
+          nullable: false
+          default: 50
+          description: Suggested replenishment quantity
+          pii_class: none
+
+        - name: location_code
+          data_type: string
+          max_length: 50
+          nullable: false
+          default: DEFAULT
+          description: Warehouse/dark store location code
+          pii_class: none
+
+      relationships:
+        - from_entity: Inventory
+          to_entity: ProductVariant
+          relation: many_to_one
+          foreign_key: product_variant_id
+          nullable: false
+
+      audit_fields: true
+      soft_delete: false
+      indexes:
+        - fields: [product_variant_id, location_code]
+          unique: true
+        - fields: [quantity_available]
+
+  - fragment_id: inventory_address
+    domain: shared
+    description: Customer address — used for both shipping and billing
+    entity:
+      name: Address
+      table_name: addresses
+      description: A physical address used for delivery or billing
+      fields:
+        - name: full_name
+          data_type: string
+          max_length: 200
+          nullable: false
+          pii_class: pii
+
+        - name: phone
+          data_type: string
+          max_length: 20
+          nullable: false
+          pii_class: pii
+
+        - name: address_line_1
+          data_type: string
+          max_length: 255
+          nullable: false
+          pii_class: pii
+
+        - name: address_line_2
+          data_type: string
+          max_length: 255
+          nullable: true
+          pii_class: pii
+
+        - name: city
+          data_type: string
+          max_length: 100
+          nullable: false
+          pii_class: none
+
+        - name: state
+          data_type: string
+          max_length: 100
+          nullable: false
+          pii_class: none
+
+        - name: pincode
+          data_type: string
+          max_length: 10
+          nullable: false
+          pii_class: none
+
+        - name: country
+          data_type: string
+          max_length: 2
+          nullable: false
+          default: IN
+          pii_class: none
+
+        - name: is_default
+          data_type: boolean
+          nullable: false
+          default: false
+          pii_class: none
+
+        - name: address_type
+          data_type: string
+          max_length: 10
+          nullable: false
+          default: SHIPPING
+          description: SHIPPING | BILLING
+          pii_class: none
+
+        - name: latitude
+          data_type: decimal
+          nullable: true
+          pii_class: none
+
+        - name: longitude
+          data_type: decimal
+          nullable: true
+          pii_class: none
+
+      relationships:
+        - from_entity: Address
+          to_entity: Customer
+          relation: many_to_one
+          foreign_key: customer_id
+          nullable: false
+
+      audit_fields: true
+      soft_delete: true
+      indexes:
+        - fields: [customer_id, is_default]
+        - fields: [pincode]

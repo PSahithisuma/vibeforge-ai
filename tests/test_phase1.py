@@ -690,3 +690,129 @@ class TestExpandedEcommercePack:
             "metacognition.py must not reference a specific vertical (C12 violated)"
         assert "ecommerce" not in graph_content.lower(), \
             "generation_graph.py must not reference a specific vertical (C12 violated)"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PACK COMPLETENESS TESTS — schema_fragments, compliance_rules, acceptance_seeds
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestPackCompleteness:
+    """
+    Verifies the complete pack folder structure required by Phase 1 spec:
+    option_graphs/ + schema_fragments/ + compliance_rules/ + acceptance_seeds/
+    """
+
+    PACK_DIR = ROOT / "packs" / "ecommerce"
+
+    def test_all_4_pack_folders_exist(self):
+        required = ["option_graphs", "schema_fragments", "compliance_rules", "acceptance_seeds"]
+        for folder in required:
+            assert (self.PACK_DIR / folder).exists(), f"Missing folder: {folder}"
+
+    def test_schema_fragments_has_core_entities(self):
+        sf = self.PACK_DIR / "schema_fragments" / "core_entities.yaml"
+        assert sf.exists(), "core_entities.yaml missing from schema_fragments/"
+        import yaml
+        data = yaml.safe_load(sf.read_text())
+        fragment_ids = {f["fragment_id"] for f in data["fragments"]}
+        for required in ["catalog_product", "cart_cart", "order_order", "inventory_stock"]:
+            assert required in fragment_ids, f"Missing fragment: {required}"
+
+    def test_schema_fragments_entities_have_fields(self):
+        import yaml
+        data = yaml.safe_load(
+            (self.PACK_DIR / "schema_fragments" / "core_entities.yaml").read_text()
+        )
+        for fragment in data["fragments"]:
+            entity = fragment["entity"]
+            assert len(entity["fields"]) >= 1, \
+                f"Fragment {fragment['fragment_id']} entity has no fields"
+
+    def test_compliance_rules_exist(self):
+        cr = self.PACK_DIR / "compliance_rules" / "rules.yaml"
+        assert cr.exists(), "rules.yaml missing from compliance_rules/"
+        import yaml
+        data = yaml.safe_load(cr.read_text())
+        assert len(data["rules"]) >= 5, "Expected at least 5 compliance rules"
+
+    def test_compliance_rules_have_semgrep_refs(self):
+        import yaml
+        data = yaml.safe_load(
+            (self.PACK_DIR / "compliance_rules" / "rules.yaml").read_text()
+        )
+        for rule in data["rules"]:
+            assert "semgrep_rule_id" in rule, \
+                f"Rule {rule['rule_id']} missing semgrep_rule_id"
+            assert "generated_control" in rule, \
+                f"Rule {rule['rule_id']} missing generated_control"
+
+    def test_acceptance_seeds_exist(self):
+        seeds_file = self.PACK_DIR / "acceptance_seeds" / "seeds.yaml"
+        assert seeds_file.exists(), "seeds.yaml missing from acceptance_seeds/"
+        import yaml
+        data = yaml.safe_load(seeds_file.read_text())
+        assert len(data["seeds"]) >= 10, "Expected at least 10 acceptance seeds"
+
+    def test_acceptance_seeds_have_gherkin_scenarios(self):
+        import yaml
+        data = yaml.safe_load(
+            (self.PACK_DIR / "acceptance_seeds" / "seeds.yaml").read_text()
+        )
+        for seed in data["seeds"]:
+            assert "scenario" in seed, f"Seed {seed['seed_id']} missing scenario"
+            assert "Given" in seed["scenario"], \
+                f"Seed {seed['seed_id']} scenario not in Gherkin format"
+            assert "When" in seed["scenario"], \
+                f"Seed {seed['seed_id']} scenario missing When clause"
+            assert "Then" in seed["scenario"], \
+                f"Seed {seed['seed_id']} scenario missing Then clause"
+
+    def test_business_models_has_all_4_archetypes(self):
+        import yaml
+        data = yaml.safe_load(
+            (self.PACK_DIR / "option_graphs" / "main.yaml").read_text()
+        )
+        bm_section = next(s for s in data["sections"] if s["section_id"] == "business_models")
+        option_ids = {o["option_id"] for o in bm_section["options"]}
+        for required in ["biz_b2c", "biz_b2b", "biz_quick_commerce", "biz_c2c"]:
+            assert required in option_ids, f"Missing business model archetype: {required}"
+
+    def test_pci_rules_apply_when_razorpay_selected(self):
+        import yaml
+        data = yaml.safe_load(
+            (self.PACK_DIR / "compliance_rules" / "rules.yaml").read_text()
+        )
+        pci_rules = [r for r in data["rules"] if r["framework"] == "pci_dss"]
+        assert len(pci_rules) >= 3, "Expected at least 3 PCI-DSS rules"
+        for rule in pci_rules:
+            applies = rule.get("applies_when", [])
+            if applies:
+                assert any(
+                    a.get("option_selected") == "pay_razorpay"
+                    for a in applies
+                ), f"PCI rule {rule['rule_id']} should apply when pay_razorpay is selected"
+
+    def test_compliance_rules_and_option_graphs_are_consistent(self):
+        """
+        Every compliance rule that has applies_when referencing an option_id
+        must reference an option_id that actually exists in the pack.
+        """
+        import yaml
+        rules_data = yaml.safe_load(
+            (self.PACK_DIR / "compliance_rules" / "rules.yaml").read_text()
+        )
+        # Gather all option_ids from all option graph files
+        all_option_ids = set()
+        for yaml_file in (self.PACK_DIR / "option_graphs").glob("*.yaml"):
+            data = yaml.safe_load(yaml_file.read_text())
+            sections = data.get("sections", [])
+            for section in sections:
+                for opt in section.get("options", []):
+                    all_option_ids.add(opt["option_id"])
+
+        for rule in rules_data["rules"]:
+            for condition in rule.get("applies_when", []):
+                opt_id = condition.get("option_selected")
+                if opt_id:
+                    assert opt_id in all_option_ids, \
+                        f"Rule {rule['rule_id']} references unknown option_id: {opt_id}"

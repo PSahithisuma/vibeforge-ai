@@ -1,0 +1,243 @@
+# VibeForge — E-commerce compliance rules
+# Machine-readable rules for the e-commerce vertical.
+#
+# Each rule has TWO parts that work together:
+#   generated_control → tells the Synthesizer HOW to generate code correctly
+#   semgrep_rule_id   → tells the QA Gate HOW to verify the code is correct
+#
+# This is how the platform generates compliance-aligned code AND verifies it.
+# Same rule exists as "generate it right" AND "verify it's right".
+
+compliance_rules_id: ecommerce_compliance_v1
+vertical: ecommerce
+version: "1.0.0"
+
+rules:
+
+  # ── PCI-DSS rules ──────────────────────────────────────────────────────────
+
+  - rule_id: PCI-ECOM-001
+    framework: pci_dss
+    severity: critical
+    title: No PAN in application logs
+    description: >
+      Primary Account Numbers (card numbers) must never appear in log statements,
+      error messages, or debug output. A breach via logs is a PCI violation.
+    generated_control: >
+      Never log card_number, pan, or credit_card fields directly. Use
+      last-four-digits representation (e.g. "****1234") in all log statements.
+      Annotate PAN fields with @Masked or equivalent stack annotation.
+    semgrep_rule_id: pci/no-pan-in-logs
+    semgrep_pattern: |
+      log.*(card_number|pan|credit_card|cvv|cvc)
+    applies_when:
+      - option_selected: pay_razorpay
+    auto_enforced: true
+    certification_evidence: true
+
+  - rule_id: PCI-ECOM-002
+    framework: pci_dss
+    severity: critical
+    title: Card numbers stored as tokens only
+    description: >
+      Full PANs must never be stored in the database. Only the payment
+      gateway's token (e.g. Razorpay token) is persisted. Razorpay handles
+      card vaulting under their PCI-DSS Level 1 certification.
+    generated_control: >
+      The Payment entity must have a razorpay_token field (string, encrypted
+      at rest) and must NOT have card_number, pan, or cvv fields. Payment
+      entity field-level encryption must be applied to razorpay_token.
+    semgrep_rule_id: pci/no-pan-storage
+    semgrep_pattern: |
+      @Column.*card_number|@Column.*pan|Column("card_number")|Column("pan")
+    applies_when:
+      - option_selected: pay_razorpay
+    auto_enforced: true
+    certification_evidence: true
+
+  - rule_id: PCI-ECOM-003
+    framework: pci_dss
+    severity: high
+    title: Payment endpoints use HTTPS only
+    description: >
+      All API endpoints that handle payment data must enforce HTTPS.
+      HTTP requests to payment endpoints must be rejected at the gateway level.
+    generated_control: >
+      Payment-related endpoints (/api/v1/payments/*, /api/v1/orders/*/pay)
+      must have require_https: true in the API model. The Scaffold generates
+      HSTS headers and HTTPS redirect middleware automatically.
+    semgrep_rule_id: pci/https-only-payment-endpoints
+    applies_when:
+      - option_selected: pay_razorpay
+    auto_enforced: true
+    certification_evidence: true
+
+  - rule_id: PCI-ECOM-004
+    framework: pci_dss
+    severity: high
+    title: CVV never stored — not even temporarily
+    description: >
+      Card Verification Values must never be stored after the initial
+      authorisation — not in logs, not in the database, not in cache.
+    generated_control: >
+      The checkout flow must not persist CVV at any point. Razorpay handles
+      CVV capture client-side (via Razorpay.js). The server never receives CVV.
+      If a CVV field appears in any server-side request model, it must be
+      immediately rejected and the request must fail.
+    semgrep_rule_id: pci/no-cvv-storage
+    applies_when:
+      - option_selected: pay_razorpay
+    auto_enforced: true
+    certification_evidence: true
+
+  # ── GST / RBI rules ────────────────────────────────────────────────────────
+
+  - rule_id: GST-ECOM-001
+    framework: rbi
+    severity: high
+    title: GST invoice generated for every B2B order above threshold
+    description: >
+      B2B transactions above INR 50,000 require an e-invoice registered on
+      the GSTN Invoice Registration Portal (IRP) with a valid IRN.
+    generated_control: >
+      The Order service must call the GST e-Invoice API after confirming
+      any B2B order with grand_total >= 50000. The GSTInvoice entity must be
+      created with the returned IRN. Orders without IRN (where required) must
+      not be marked CONFIRMED.
+    semgrep_rule_id: gst/irn-required-above-threshold
+    applies_when:
+      - option_selected: comp_gst
+      - option_selected: biz_b2b
+    auto_enforced: true
+    certification_evidence: true
+
+  - rule_id: GST-ECOM-002
+    framework: rbi
+    severity: medium
+    title: GSTIN validated before B2B order confirmation
+    description: >
+      Business customer GSTIN (tax registration number) must be validated
+      against the GSTN API before accepting B2B orders from that account.
+    generated_control: >
+      BusinessAccount.gst_number must be validated via the GSTN verification
+      endpoint before the account status is set to VERIFIED. Unverified
+      business accounts cannot place B2B orders.
+    semgrep_rule_id: gst/gstin-validation-required
+    applies_when:
+      - option_selected: comp_gst
+      - option_selected: biz_b2b
+    auto_enforced: false
+    certification_evidence: true
+
+  # ── GDPR rules ─────────────────────────────────────────────────────────────
+
+  - rule_id: GDPR-ECOM-001
+    framework: gdpr
+    severity: critical
+    title: PII fields encrypted at rest
+    description: >
+      Fields classified as pii_class=pii must be encrypted at rest using
+      field-level encryption. This applies to: full_name, phone, address_line_1,
+      address_line_2, email, and payment_method_token.
+    generated_control: >
+      All entity fields with pii_class=pii must be annotated with the stack's
+      field-level encryption annotation (e.g. @Encrypted in Java, EncryptedField
+      in Python). The scaffold provides the encryption interceptor — the
+      Synthesizer must apply the annotation to all pii fields.
+    semgrep_rule_id: gdpr/pii-field-encryption
+    applies_when:
+      - option_selected: comp_gdpr
+    auto_enforced: true
+    certification_evidence: true
+
+  - rule_id: GDPR-ECOM-002
+    framework: gdpr
+    severity: high
+    title: Right to erasure implemented
+    description: >
+      Customers must be able to request deletion of all their personal data.
+      The platform must provide a DELETE /customers/me endpoint that triggers
+      a cascade deletion or anonymization of all PII.
+    generated_control: >
+      The Customer entity must have an anonymized_at datetime field. On erasure
+      request: PII fields are overwritten with anonymized values (not deleted,
+      to preserve order history referential integrity). Email replaced with
+      deleted_{uuid}@deleted.vibeforge.io, name replaced with "Deleted User",
+      phone replaced with "0000000000". Addresses soft-deleted.
+    semgrep_rule_id: gdpr/right-to-erasure-endpoint
+    applies_when:
+      - option_selected: comp_gdpr
+    auto_enforced: true
+    certification_evidence: true
+
+  - rule_id: GDPR-ECOM-003
+    framework: gdpr
+    severity: medium
+    title: Data retention policy enforced
+    description: >
+      Personal data must not be retained beyond the configured retention period
+      after the customer's last order. Default: 90 days post-delivery.
+    generated_control: >
+      A scheduled job (retention_cleanup) must be generated that runs daily
+      and anonymizes Customer records where last_order_date is older than
+      the configured retention_days. The job must write an audit_log entry
+      for every record processed.
+    semgrep_rule_id: gdpr/retention-cleanup-job-exists
+    applies_when:
+      - option_selected: comp_gdpr
+    auto_enforced: false
+    certification_evidence: true
+
+  # ── General security rules ─────────────────────────────────────────────────
+
+  - rule_id: SEC-ECOM-001
+    framework: owasp
+    severity: high
+    title: SQL injection prevention — parameterized queries only
+    description: >
+      All database queries must use parameterized statements or the ORM's
+      built-in query builder. String concatenation into SQL is prohibited.
+    generated_control: >
+      The Synthesizer must use the stack's ORM for all database access
+      (JPA/Hibernate for Java, SQLAlchemy for Python, EF Core for C#).
+      Raw SQL strings with user input concatenation must never be generated.
+      The scaffold provides repository base classes — use them.
+    semgrep_rule_id: owasp/no-sql-injection
+    applies_when: []
+    auto_enforced: true
+    certification_evidence: false
+
+  - rule_id: SEC-ECOM-002
+    framework: owasp
+    severity: high
+    title: Authentication required on all order and payment endpoints
+    description: >
+      Endpoints under /orders, /payments, /customers/me, /addresses must
+      require authentication. Only product catalog endpoints are public.
+    generated_control: >
+      API endpoints for orders, payments, and customer data must have
+      auth_required: true in the API model. The scaffold's security config
+      enforces this at the framework level — but the Synthesizer must also
+      apply method-level security annotations (@PreAuthorize etc.).
+    semgrep_rule_id: owasp/auth-required-on-sensitive-endpoints
+    applies_when: []
+    auto_enforced: true
+    certification_evidence: false
+
+  - rule_id: SEC-ECOM-003
+    framework: owasp
+    severity: medium
+    title: No secrets in source code
+    description: >
+      API keys, database passwords, and JWT secrets must never appear as
+      string literals in source code. All secrets must be read from
+      environment variables at runtime.
+    generated_control: >
+      The Synthesizer must never generate hardcoded secret values. All
+      configuration that varies by environment (DB credentials, API keys,
+      JWT secret) must reference environment variable names only
+      (e.g. System.getenv("RAZORPAY_KEY_ID") not "rzp_live_abc123").
+    semgrep_rule_id: gitleaks/no-secrets-in-source
+    applies_when: []
+    auto_enforced: true
+    certification_evidence: false

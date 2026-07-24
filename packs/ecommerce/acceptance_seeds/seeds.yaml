@@ -1,0 +1,384 @@
+# VibeForge — E-commerce acceptance seeds
+# Canonical acceptance criteria per feature.
+# These are the seeds of the generated test suite.
+# The QA Gate's API smoke tests are generated from these criteria.
+# The Completeness Validator checks that at least one criterion exists per feature.
+
+acceptance_seeds_id: ecommerce_acceptance_v1
+vertical: ecommerce
+version: "1.0.0"
+
+# How seeds work:
+#   - scenario: written in Gherkin (Given/When/Then)
+#   - endpoint: the API endpoint being tested
+#   - expected_status: HTTP status code
+#   - test_data: seed data injected before the test
+#   - assertions: what the test verifies beyond status code
+#   - applies_when: which option must be selected for this seed to apply
+
+seeds:
+
+  # ── Catalog ────────────────────────────────────────────────────────────────
+
+  - seed_id: AC-CAT-001
+    feature: product_catalog
+    title: Customer can list active products
+    applies_when: []
+    scenario: |
+      Given the catalog contains 10 active products and 2 inactive products
+      When an unauthenticated user calls GET /api/v1/products
+      Then the response status is 200
+      And the response contains exactly 10 products
+      And no inactive products are included
+    endpoint: GET /api/v1/products
+    expected_status: 200
+    test_data:
+      products_active: 10
+      products_inactive: 2
+    assertions:
+      - response.data.length == 10
+      - all(p.is_active == true for p in response.data)
+      - response.pagination.total == 10
+
+  - seed_id: AC-CAT-002
+    feature: product_catalog
+    title: Customer can view a single product
+    applies_when: []
+    scenario: |
+      Given a product with slug "test-product" exists
+      When an unauthenticated user calls GET /api/v1/products/test-product
+      Then the response status is 200
+      And the response contains the product title, price, and description
+    endpoint: GET /api/v1/products/{slug}
+    expected_status: 200
+    assertions:
+      - response.data.slug == "test-product"
+      - response.data.title is not null
+      - response.data.base_price > 0
+
+  - seed_id: AC-CAT-003
+    feature: product_catalog
+    title: Returns 404 for non-existent product
+    applies_when: []
+    scenario: |
+      Given no product with slug "does-not-exist" exists
+      When a user calls GET /api/v1/products/does-not-exist
+      Then the response status is 404
+      And the response contains an error message
+    endpoint: GET /api/v1/products/{slug}
+    expected_status: 404
+    assertions:
+      - response.error is not null
+
+  - seed_id: AC-CAT-004
+    feature: product_search
+    title: Search returns matching products
+    applies_when:
+      - option_selected: cat_search
+    scenario: |
+      Given the catalog contains products with title "Red Running Shoes" and "Blue Walking Shoes"
+      When a user calls GET /api/v1/products/search?q=running
+      Then the response status is 200
+      And the response contains "Red Running Shoes"
+      And does not contain "Blue Walking Shoes"
+    endpoint: GET /api/v1/products/search
+    expected_status: 200
+    test_data:
+      products:
+        - {title: "Red Running Shoes", is_active: true}
+        - {title: "Blue Walking Shoes", is_active: true}
+    assertions:
+      - response.data.length >= 1
+      - any(p.title == "Red Running Shoes" for p in response.data)
+      - all("running" in p.title.lower() for p in response.data)
+
+  - seed_id: AC-CAT-005
+    feature: product_variants
+    title: Product variants listed for a product
+    applies_when:
+      - option_selected: cat_variants
+    scenario: |
+      Given a product has 3 variants (Red/S, Red/M, Blue/L)
+      When a user calls GET /api/v1/products/{id}/variants
+      Then the response status is 200
+      And the response contains exactly 3 variants
+      And each variant has sku, price, and stock_quantity
+    endpoint: GET /api/v1/products/{id}/variants
+    expected_status: 200
+    test_data:
+      variants: 3
+    assertions:
+      - response.data.length == 3
+      - all(v.sku is not null for v in response.data)
+      - all(v.price > 0 for v in response.data)
+
+  # ── Cart ───────────────────────────────────────────────────────────────────
+
+  - seed_id: AC-CART-001
+    feature: cart
+    title: Authenticated customer can add item to cart
+    applies_when: []
+    scenario: |
+      Given an authenticated customer
+      And a product variant with sufficient stock exists
+      When the customer calls POST /api/v1/cart/items with quantity 2
+      Then the response status is 201
+      And the cart contains the item with quantity 2
+      And the cart subtotal reflects the item price × quantity
+    endpoint: POST /api/v1/cart/items
+    expected_status: 201
+    test_data:
+      customer: {authenticated: true}
+      variant: {stock_quantity: 10, price: 499.00}
+      quantity: 2
+    assertions:
+      - response.data.cart.items.length == 1
+      - response.data.cart.items[0].quantity == 2
+      - response.data.cart.subtotal == 998.00
+
+  - seed_id: AC-CART-002
+    feature: cart
+    title: Cannot add out-of-stock item to cart
+    applies_when: []
+    scenario: |
+      Given a product variant with stock_quantity of 0
+      When a customer calls POST /api/v1/cart/items
+      Then the response status is 422
+      And the response contains an out-of-stock error
+    endpoint: POST /api/v1/cart/items
+    expected_status: 422
+    test_data:
+      variant: {stock_quantity: 0}
+    assertions:
+      - response.error.code == "OUT_OF_STOCK"
+
+  - seed_id: AC-CART-003
+    feature: cart
+    title: Cart persists across sessions for authenticated users
+    applies_when: []
+    scenario: |
+      Given an authenticated customer added 2 items to their cart
+      When the customer starts a new session and calls GET /api/v1/cart
+      Then the response status is 200
+      And the cart contains the same 2 items
+    endpoint: GET /api/v1/cart
+    expected_status: 200
+    assertions:
+      - response.data.items.length == 2
+
+  # ── Checkout and Orders ────────────────────────────────────────────────────
+
+  - seed_id: AC-ORDER-001
+    feature: checkout
+    title: Authenticated customer can place an order
+    applies_when: []
+    scenario: |
+      Given an authenticated customer with items in their cart
+      And a valid shipping address
+      And a successful payment (mocked Razorpay response)
+      When the customer calls POST /api/v1/orders
+      Then the response status is 201
+      And the order status is PLACED
+      And the order has a unique order_number
+      And an order confirmation email is queued
+    endpoint: POST /api/v1/orders
+    expected_status: 201
+    assertions:
+      - response.data.status == "PLACED"
+      - response.data.order_number starts_with "ORD-"
+      - response.data.grand_total > 0
+
+  - seed_id: AC-ORDER-002
+    feature: checkout
+    title: Guest customer can place an order without account
+    applies_when:
+      - option_selected: pay_guest_checkout
+    scenario: |
+      Given an unauthenticated user with items in a guest cart (session token)
+      And a valid email, name, and shipping address in the request
+      When the user calls POST /api/v1/orders/guest
+      Then the response status is 201
+      And the order status is PLACED
+      And no customer account is created
+      And a guest confirmation email is sent
+    endpoint: POST /api/v1/orders/guest
+    expected_status: 201
+    assertions:
+      - response.data.status == "PLACED"
+      - response.data.customer_id is null
+
+  - seed_id: AC-ORDER-003
+    feature: order_management
+    title: Customer can view their order history
+    applies_when: []
+    scenario: |
+      Given an authenticated customer with 3 placed orders
+      When the customer calls GET /api/v1/orders
+      Then the response status is 200
+      And the response contains exactly 3 orders
+      And orders are sorted by placed_at descending
+    endpoint: GET /api/v1/orders
+    expected_status: 200
+    test_data:
+      orders: 3
+    assertions:
+      - response.data.length == 3
+      - response.data[0].placed_at >= response.data[1].placed_at
+
+  - seed_id: AC-ORDER-004
+    feature: order_management
+    title: Customer can cancel a PLACED order
+    applies_when: []
+    scenario: |
+      Given an authenticated customer with an order in PLACED status
+      When the customer calls POST /api/v1/orders/{id}/cancel
+      Then the response status is 200
+      And the order status is CANCELLED
+      And a refund is initiated
+    endpoint: POST /api/v1/orders/{id}/cancel
+    expected_status: 200
+    assertions:
+      - response.data.status == "CANCELLED"
+      - response.data.cancelled_at is not null
+
+  - seed_id: AC-ORDER-005
+    feature: order_management
+    title: Cannot cancel a DELIVERED order
+    applies_when: []
+    scenario: |
+      Given an authenticated customer with an order in DELIVERED status
+      When the customer calls POST /api/v1/orders/{id}/cancel
+      Then the response status is 422
+      And the response contains a status transition error
+    endpoint: POST /api/v1/orders/{id}/cancel
+    expected_status: 422
+    assertions:
+      - response.error.code == "INVALID_STATE_TRANSITION"
+
+  # ── Payments ───────────────────────────────────────────────────────────────
+
+  - seed_id: AC-PAY-001
+    feature: payments
+    title: Razorpay order created before payment
+    applies_when:
+      - option_selected: pay_razorpay
+    scenario: |
+      Given an authenticated customer with items in their cart
+      When the customer calls POST /api/v1/payments/initiate with their order
+      Then the response status is 200
+      And the response contains a razorpay_order_id
+      And the Payment record has status PENDING
+    endpoint: POST /api/v1/payments/initiate
+    expected_status: 200
+    assertions:
+      - response.data.razorpay_order_id starts_with "order_"
+      - response.data.status == "PENDING"
+      - response.data.amount > 0
+
+  - seed_id: AC-PAY-002
+    feature: payments
+    title: Razorpay webhook confirms payment successfully
+    applies_when:
+      - option_selected: pay_razorpay
+    scenario: |
+      Given a PENDING payment with a known razorpay_order_id
+      When Razorpay sends a payment.captured webhook with valid signature
+      Then the response status is 200
+      And the Payment status is CAPTURED
+      And the associated Order status moves to CONFIRMED
+    endpoint: POST /api/v1/payments/webhook
+    expected_status: 200
+    test_data:
+      webhook_event: payment.captured
+      signature_valid: true
+    assertions:
+      - payment.status == "CAPTURED"
+      - order.status == "CONFIRMED"
+
+  - seed_id: AC-PAY-003
+    feature: payments
+    title: Invalid webhook signature is rejected
+    applies_when:
+      - option_selected: pay_razorpay
+    scenario: |
+      Given a PENDING payment exists with a known razorpay_order_id
+      When a webhook arrives with an invalid Razorpay signature
+      Then the response status is 401
+      And the Payment status is NOT updated
+    endpoint: POST /api/v1/payments/webhook
+    expected_status: 401
+    test_data:
+      signature_valid: false
+    assertions:
+      - payment.status unchanged
+
+  # ── Inventory ──────────────────────────────────────────────────────────────
+
+  - seed_id: AC-INV-001
+    feature: inventory
+    title: Stock is reserved when order is placed
+    applies_when: []
+    scenario: |
+      Given a product variant with quantity_on_hand=10 and quantity_reserved=0
+      When an order is placed for 3 units of that variant
+      Then the variant's quantity_reserved becomes 3
+      And the quantity_available becomes 7
+    endpoint: POST /api/v1/orders
+    expected_status: 201
+    assertions:
+      - inventory.quantity_reserved == 3
+      - inventory.quantity_available == 7
+
+  - seed_id: AC-INV-002
+    feature: inventory
+    title: Stock is released when order is cancelled
+    applies_when: []
+    scenario: |
+      Given an order in PLACED status that reserved 3 units
+      When the order is cancelled
+      Then the variant's quantity_reserved decreases by 3
+      And the quantity_available increases by 3
+    endpoint: POST /api/v1/orders/{id}/cancel
+    expected_status: 200
+    assertions:
+      - inventory.quantity_reserved == 0
+      - inventory.quantity_available == 10
+
+  # ── Compliance ─────────────────────────────────────────────────────────────
+
+  - seed_id: AC-COMP-001
+    feature: pci_compliance
+    title: PAN never logged during payment flow
+    applies_when:
+      - option_selected: pay_razorpay
+    scenario: |
+      Given a payment is processed with a test card
+      When the application logs are inspected after the transaction
+      Then no log entry contains a full card number pattern matching 16 consecutive digits
+      And the PAN appears only as a masked value like ****1234
+    endpoint: POST /api/v1/payments/initiate
+    expected_status: 200
+    test_type: log_inspection
+    assertions:
+      - logs do not match pattern [0-9]{16}
+
+  - seed_id: AC-COMP-002
+    feature: gst_compliance
+    title: IRN generated for B2B order above threshold
+    applies_when:
+      - option_selected: comp_gst
+      - option_selected: biz_b2b
+    scenario: |
+      Given a B2B customer with verified GSTIN
+      When they place an order with grand_total of INR 75,000
+      Then the GSTInvoice is created with a non-null IRN
+      And the IRN is 64 characters in length
+    endpoint: POST /api/v1/orders
+    expected_status: 201
+    test_data:
+      customer_type: B2B
+      gstin: "29ABCDE1234F1Z5"
+      grand_total: 75000
+    assertions:
+      - gst_invoice.irn is not null
+      - len(gst_invoice.irn) == 64

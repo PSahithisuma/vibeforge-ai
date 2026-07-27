@@ -1,0 +1,341 @@
+pack_id: ecommerce_v1
+pack_version: "1.0.0"
+vertical: ecommerce
+
+sections:
+
+  # ── Business models ──────────────────────────────────────────────────────────
+  - section_id: business_models
+    label: Business model
+    description: Select all that apply. Incompatible combinations will be flagged.
+    prerequisite_options: []
+    options:
+
+      - option_id: biz_b2c
+        label: B2C — direct to consumer
+        description: Sell products directly to end consumers.
+        section: business_models
+        default_selected: true
+        eligibility: []
+        spec_bindings:
+          - json_path: business_models
+            operation: append
+            value: b2c
+        impact_hint: {entities: 1, endpoints: 4, screens: 3}
+
+      - option_id: biz_b2b
+        label: B2B — business accounts
+        description: Sell to business customers with account management.
+        section: business_models
+        eligibility: []
+        spec_bindings:
+          - json_path: business_models
+            operation: append
+            value: b2b
+          - json_path: domain_model.entities
+            operation: append
+            value:
+              name: BusinessAccount
+              table_name: business_accounts
+              description: Corporate buyer account
+              fields:
+                - {name: company_name, data_type: string, nullable: false}
+                - {name: gst_number, data_type: string, nullable: true}
+                - {name: credit_limit, data_type: money, nullable: true, pii_class: sensitive}
+              relationships: []
+              soft_delete: true
+              audit_fields: true
+        impact_hint: {entities: 2, endpoints: 6, screens: 2}
+
+      - option_id: biz_quick_commerce
+        label: Quick commerce — dark store model
+        description: 10–30 minute delivery from local inventory nodes.
+        section: business_models
+        eligibility:
+          - rule_id: qc_requires_b2c
+            description: Quick commerce requires B2C model
+            requires_any: [biz_b2c]
+            conflicts_with: [biz_b2b]
+        spec_bindings:
+          - json_path: business_models
+            operation: append
+            value: quick_commerce
+          - json_path: domain_model.entities
+            operation: append
+            value:
+              name: DarkStore
+              table_name: dark_stores
+              description: Local fulfilment node
+              fields:
+                - {name: name, data_type: string, nullable: false}
+                - {name: latitude, data_type: decimal, nullable: false}
+                - {name: longitude, data_type: decimal, nullable: false}
+                - {name: service_radius_km, data_type: decimal, nullable: false}
+                - {name: active, data_type: boolean, nullable: false}
+              relationships: []
+              soft_delete: false
+              audit_fields: true
+        impact_hint: {entities: 3, endpoints: 5, screens: 2, compliance_rules: 1}
+
+
+      - option_id: biz_c2c
+        label: C2C — consumer marketplace
+        description: Platform where consumers buy and sell from each other (marketplace model).
+        section: business_models
+        eligibility:
+          - rule_id: c2c_requires_b2c
+            description: C2C marketplace requires B2C model as base
+            requires_any: [biz_b2c]
+        spec_bindings:
+          - json_path: business_models
+            operation: append
+            value: c2c
+          - json_path: domain_model.entities
+            operation: append
+            value:
+              name: Seller
+              table_name: sellers
+              description: A consumer who sells on the marketplace
+              fields:
+                - {name: display_name, data_type: string, nullable: false}
+                - {name: bio, data_type: text, nullable: true}
+                - {name: rating, data_type: decimal, nullable: true}
+                - {name: total_sales, data_type: integer, nullable: false, default: 0}
+                - {name: is_verified, data_type: boolean, nullable: false, default: false}
+                - {name: commission_rate, data_type: decimal, nullable: false, default: 0.10}
+              relationships:
+                - {from_entity: Seller, to_entity: Customer, relation: many_to_one, foreign_key: customer_id}
+              soft_delete: true
+              audit_fields: true
+        impact_hint: {entities: 2, endpoints: 8, screens: 4}
+
+  # ── Catalog ───────────────────────────────────────────────────────────────────
+  - section_id: catalog
+    label: Catalog and products
+    prerequisite_options: [biz_b2c]
+    options:
+
+      - option_id: cat_variants
+        label: Product variants (size, color, etc.)
+        description: Allow products to have multiple variants with different prices and stock.
+        section: catalog
+        eligibility: []
+        spec_bindings:
+          - json_path: domain_model.entities
+            operation: append
+            value:
+              name: ProductVariant
+              table_name: product_variants
+              description: A specific variant of a product
+              fields:
+                - {name: sku, data_type: string, nullable: false}
+                - {name: price, data_type: money, nullable: false}
+                - {name: stock_quantity, data_type: integer, nullable: false}
+                - {name: variant_attributes, data_type: json, nullable: true}
+              relationships:
+                - {from_entity: ProductVariant, to_entity: Product, relation: one_to_many}
+              soft_delete: true
+              audit_fields: true
+        impact_hint: {entities: 1, endpoints: 4, screens: 1}
+
+      - option_id: cat_search
+        label: Product search and filters
+        description: Full-text search with category, price, rating filters.
+        section: catalog
+        eligibility: []
+        spec_bindings:
+          - json_path: api_model.endpoints
+            operation: append
+            value:
+              path: /api/v1/products/search
+              method: GET
+              operation_id: searchProducts
+              summary: Full-text product search with filters
+              auth_required: false
+              request_params:
+                - {name: q, location: query, data_type: string, required: false}
+                - {name: category_id, location: query, data_type: uuid, required: false}
+                - {name: min_price, location: query, data_type: decimal, required: false}
+                - {name: max_price, location: query, data_type: decimal, required: false}
+                - {name: page, location: query, data_type: integer, required: false}
+              paginated: true
+              response_entity: Product
+        impact_hint: {endpoints: 1}
+
+      - option_id: cat_categories
+        label: Category hierarchy
+        description: Nested product categories (up to 3 levels).
+        section: catalog
+        eligibility: []
+        spec_bindings:
+          - json_path: domain_model.entities
+            operation: append
+            value:
+              name: Category
+              table_name: categories
+              description: Hierarchical product category
+              fields:
+                - {name: name, data_type: string, nullable: false}
+                - {name: slug, data_type: string, nullable: false}
+                - {name: parent_category_id, data_type: uuid, nullable: true}
+                - {name: image_url, data_type: string, nullable: true}
+                - {name: active, data_type: boolean, nullable: false}
+              relationships:
+                - {from_entity: Category, to_entity: Category, relation: one_to_many}
+              soft_delete: true
+              audit_fields: true
+        impact_hint: {entities: 1, endpoints: 3}
+
+  # ── Payments ──────────────────────────────────────────────────────────────────
+  - section_id: payments
+    label: Payments
+    prerequisite_options: [biz_b2c]
+    options:
+
+      - option_id: pay_razorpay
+        label: Razorpay integration
+        description: Accept cards, UPI, net banking, wallets via Razorpay.
+        section: payments
+        eligibility: []
+        spec_bindings:
+          - json_path: integration_model.connectors
+            operation: append
+            value:
+              name: Razorpay
+              connector_id: razorpay_v1
+              auth_mode: api_key
+              mock_server: true
+              operations:
+                - {name: createOrder, http_method: POST, path: /v1/orders}
+                - {name: capturePayment, http_method: POST, path: '/v1/payments/{id}/capture'}
+                - {name: refund, http_method: POST, path: '/v1/payments/{id}/refund'}
+              base_url_env_var: RAZORPAY_BASE_URL
+              description: Razorpay payment gateway
+        impact_hint: {endpoints: 3, integration: Razorpay, compliance_rules: 1}
+
+      - option_id: pay_guest_checkout
+        label: Guest checkout (no account required)
+        description: Allow purchases without creating an account.
+        section: payments
+        eligibility:
+          - rule_id: guest_requires_b2c
+            description: Guest checkout is B2C only
+            requires_any: [biz_b2c]
+            conflicts_with: [biz_b2b]
+        spec_bindings:
+          - json_path: security_model.roles
+            operation: append
+            value:
+              name: GUEST
+              description: Unauthenticated or temporary session user
+              permissions: [cart:read, cart:write, order:create, product:read]
+          - json_path: acceptance_criteria.criteria
+            operation: append
+            value:
+              criterion_id: AC-GUEST-001
+              feature: Guest checkout
+              scenario: >
+                Given an unauthenticated user
+                When they add a product to cart and complete checkout
+                Then an order is created and a confirmation email is sent
+                And no account is required
+              endpoint: /api/v1/orders
+              expected_status: 201
+              test_seed: true
+        impact_hint: {endpoints: 2, screens: 1}
+
+      - option_id: pay_saved_methods
+        label: Saved payment methods
+        description: Let logged-in users save cards and bank accounts.
+        section: payments
+        eligibility:
+          - rule_id: saved_no_guest
+            description: Saved methods requires user accounts
+            conflicts_with: []
+        spec_bindings:
+          - json_path: domain_model.entities
+            operation: append
+            value:
+              name: SavedPaymentMethod
+              table_name: saved_payment_methods
+              description: Tokenized payment method
+              fields:
+                - {name: payment_method_token, data_type: string, nullable: false, pii_class: pii}
+                - {name: last_four, data_type: string, nullable: false}
+                - {name: card_brand, data_type: string, nullable: true}
+                - {name: is_default, data_type: boolean, nullable: false}
+              relationships:
+                - {from_entity: SavedPaymentMethod, to_entity: Customer, relation: one_to_many}
+              soft_delete: true
+              audit_fields: true
+        impact_hint: {entities: 1, endpoints: 4, compliance_rules: 2}
+
+  # ── Compliance ────────────────────────────────────────────────────────────────
+  - section_id: compliance
+    label: Compliance
+    prerequisite_options: []
+    options:
+
+
+      - option_id: comp_gdpr
+        label: GDPR data privacy
+        description: Right to erasure, data export, consent tracking for EU customers.
+        section: compliance
+        eligibility: []
+        spec_bindings:
+          - json_path: compliance_model.frameworks
+            operation: append
+            value: gdpr
+          - json_path: compliance_model.data_retention_days
+            operation: set
+            value: 90
+        impact_hint: {endpoints: 2, compliance_rules: 3}
+
+      - option_id: comp_gst
+        label: GST e-invoicing (India)
+        description: Generate IRN-compliant e-invoices for B2B transactions above ₹5 lakh.
+        section: compliance
+        eligibility:
+          - rule_id: gst_requires_b2b
+            description: GST e-invoicing applies to B2B sales
+            requires_any: [biz_b2b]
+        spec_bindings:
+          - json_path: compliance_model.frameworks
+            operation: append
+            value: rbi
+          - json_path: integration_model.connectors
+            operation: append
+            value:
+              name: GSTIN e-Invoice API
+              connector_id: gst_einvoice_v1
+              auth_mode: api_key
+              mock_server: true
+              operations:
+                - {name: generateIRN, http_method: POST, path: '/einvoice/generate'}
+                - {name: cancelIRN, http_method: POST, path: '/einvoice/cancel'}
+              base_url_env_var: GST_EINVOICE_BASE_URL
+              description: GSTIN e-invoice IRN generation
+        impact_hint: {endpoints: 2, integration: GST eInvoice, compliance_rules: 3}
+
+      - option_id: comp_pci
+        label: PCI-DSS alignment
+        description: Apply PCI-DSS controls — PAN tokenisation, no-PAN-in-logs Semgrep rules.
+        section: compliance
+        eligibility:
+          - rule_id: pci_requires_payment
+            description: PCI compliance requires a payment integration
+            requires_any: [pay_razorpay]
+        spec_bindings:
+          - json_path: compliance_model.frameworks
+            operation: append
+            value: pci_dss
+          - json_path: compliance_model.rules
+            operation: append
+            value:
+              framework: pci_dss
+              rule_id: PCI-DSS-3.4
+              description: Render PAN unreadable wherever stored
+              generated_control: Field-level encryption on card_number fields; PAN stored as token only
+              semgrep_rule_id: pci-no-pan-in-logs
+              verified: false
+        impact_hint: {compliance_rules: 5}

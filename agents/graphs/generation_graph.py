@@ -25,6 +25,19 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
+# ── Phase 2 agent imports ─────────────────────────────────────────────────────
+# Imported lazily inside nodes so Phase 0 tests still work without llm_client.
+# In production, llm_client is injected via GenerationState or a module-level var.
+try:
+    from agents.generation.planner import PlannerAgent, ModulePlanOutput
+    from agents.generation.synthesizer import SynthesizerAgent, FileMapOutput as SynthFileMap
+    from agents.generation.assembler import Assembler, AssemblyResult
+    from agents.generation.reviewer_fixer import ReviewerAgent, FixerAgent, MetacognitionGateTier1
+    _PHASE2_AVAILABLE = True
+except ImportError:
+    _PHASE2_AVAILABLE = False
+    logger.warning("[Graph] Phase 2 agents not importable — running in Phase 0 stub mode")
+
 MAX_FIX_ITERATIONS = 3   # Contract C5
 
 
@@ -261,9 +274,9 @@ def _wrap_events(state: GenerationState) -> GenerationState:
 
 def node_plan(state: GenerationState) -> dict:
     """
-    Planner: frozen Spec IR → ordered module list.
-    Phase 0 stub — deterministic from entity names.
-    Phase 2: Qwen3-8B generates the DAG with cross-cutting sequencing.
+    Planner: frozen Spec IR → ordered module DAG.
+    Phase 2: PlannerAgent (Qwen3-8B) generates real DAG.
+    Falls back to deterministic stub if agent unavailable.
     """
     state = _emit(state, "plan_node", GenerationPhase.PLANNING, {"status": "started"})
     state.current_phase = GenerationPhase.PLANNING
@@ -271,25 +284,60 @@ def node_plan(state: GenerationState) -> dict:
     state.started_at    = datetime.now(timezone.utc).isoformat()
 
     modules: list[ModulePlan] = []
-    if state.spec_entity_names:
-        for i, name in enumerate(state.spec_entity_names):
-            b = f"m{i*3}"
-            modules += [
-                ModulePlan(module_id=f"{b}_entity",  name=f"{name}Entity",
-                           module_type="entity",     dependencies=[]),
-                ModulePlan(module_id=f"{b}_repo",    name=f"{name}Repository",
-                           module_type="repository", dependencies=[f"{b}_entity"]),
-                ModulePlan(module_id=f"{b}_service", name=f"{name}Service",
-                           module_type="service",    dependencies=[f"{b}_repo"]),
+
+    if _PHASE2_AVAILABLE and state.llm_client and state.spec_entity_names:
+        # Phase 2: use real PlannerAgent
+        import asyncio
+        try:
+            planner = PlannerAgent(state.llm_client)
+            spec_dict = getattr(state, "spec_snapshot", {}) or {}
+            if not spec_dict:
+                # Build minimal spec_dict from entity names
+                spec_dict = {
+                    "domain_model": {
+                        "entities": [{"name": n, "fields": []} for n in state.spec_entity_names]
+                    },
+                    "api_model": {"endpoints": []},
+                    "vertical": "",
+                    "stack": {"backend": state.stack_profile},
+                }
+            plan_output = asyncio.get_event_loop().run_until_complete(
+                planner.plan(spec_dict, stack_profile=state.stack_profile, job_id=state.job_id)
+            )
+            for pm in plan_output.modules:
+                modules.append(ModulePlan(
+                    module_id=pm.module_id,
+                    name=pm.name,
+                    module_type=pm.module_type,
+                    dependencies=pm.dependencies,
+                    spec_slice={"spec_paths": pm.spec_paths},
+                ))
+            logger.info("[node_plan] Phase 2 planner: %d modules", len(modules))
+        except Exception as e:
+            logger.warning("[node_plan] Phase 2 planner failed (%s) — falling back to stub", e)
+            modules = []
+
+    if not modules:
+        # Deterministic fallback (Phase 0 stub)
+        if state.spec_entity_names:
+            for i, name in enumerate(state.spec_entity_names):
+                b = f"m{i*3}"
+                modules += [
+                    ModulePlan(module_id=f"{b}_entity",  name=f"{name}Entity",
+                               module_type="entity",     dependencies=[]),
+                    ModulePlan(module_id=f"{b}_repo",    name=f"{name}Repository",
+                               module_type="repository", dependencies=[f"{b}_entity"]),
+                    ModulePlan(module_id=f"{b}_service", name=f"{name}Service",
+                               module_type="service",    dependencies=[f"{b}_repo"]),
+                ]
+            modules.append(ModulePlan(
+                module_id="migration", name="DatabaseMigrations",
+                module_type="migration", dependencies=[]))
+        else:
+            modules = [
+                ModulePlan(module_id="m1", name="CustomerService",
+                           module_type="service", dependencies=[]),
             ]
-        modules.append(ModulePlan(
-            module_id="migration", name="DatabaseMigrations",
-            module_type="migration", dependencies=[]))
-    else:
-        modules = [
-            ModulePlan(module_id="m1", name="CustomerService",
-                       module_type="service", dependencies=[]),
-        ]
 
     state.module_plan = modules
     state = _emit(state, "plan_node", GenerationPhase.PLANNING,
@@ -323,31 +371,71 @@ def node_scaffold(state: GenerationState) -> dict:
 
 def node_synthesize(state: GenerationState) -> dict:
     """
-    Per-module code generation. Sequential in Phase 2.
-    Phase 0 stub — placeholder Java files per module.
-    Phase 2: Qwen2.5-Coder-32B with guided decoding → real file map.
+    Per-module code generation. Sequential (Phase 2 decision — locked).
+    Phase 2: SynthesizerAgent (Qwen2.5-Coder-32B) generates real code.
+    Falls back to stub if agent unavailable.
     """
     state = _emit(state, "synthesize_node", GenerationPhase.SYNTHESIZING,
                   {"status": "started", "total": len(state.module_plan)})
     state.current_phase = GenerationPhase.SYNTHESIZING
     file_maps: list[FileMap] = []
-    for idx, module in enumerate(state.module_plan):
-        state = _emit(state, "synthesize_node", GenerationPhase.SYNTHESIZING, {
-            "status": "synthesizing",
-            "module": module.name,
-            "index":  idx + 1,
-            "total":  len(state.module_plan),
-        })
-        pkg = module.name.lower()
-        file_maps.append(FileMap(
-            module_id=module.module_id,
-            files={
-                f"src/main/java/com/vibeforge/{pkg}/{module.name}.java":
-                    f"// STUB: {module.name}\npublic class {module.name} {{}}",
-                f"src/test/java/com/vibeforge/{pkg}/{module.name}Test.java":
-                    f"// STUB test: {module.name}",
-            },
-        ))
+
+    if _PHASE2_AVAILABLE and state.llm_client:
+        import asyncio
+        synthesizer = SynthesizerAgent(state.llm_client, stack_profile=state.stack_profile)
+        previously_synthesized: dict[str, str] = {}
+        spec_dict = getattr(state, "spec_snapshot", {}) or {}
+
+        for idx, module in enumerate(state.module_plan):
+            state = _emit(state, "synthesize_node", GenerationPhase.SYNTHESIZING, {
+                "status": "synthesizing",
+                "module": module.name,
+                "index": idx + 1,
+                "total": len(state.module_plan),
+            })
+            try:
+                synth_out = asyncio.get_event_loop().run_until_complete(
+                    synthesizer.synthesize_module(
+                        module=module,
+                        spec_dict=spec_dict,
+                        previously_synthesized=previously_synthesized,
+                        job_id=state.job_id,
+                    )
+                )
+                fm = FileMap(module_id=module.module_id)
+                for sf in synth_out.files:
+                    fm.files[sf.filename] = sf.content
+                    previously_synthesized[sf.filename] = sf.content
+                file_maps.append(fm)
+                logger.info("[node_synthesize] module=%s files=%d", module.name, len(fm.files))
+            except Exception as e:
+                logger.error("[node_synthesize] module=%s failed: %s — using stub", module.name, e)
+                pkg = module.name.lower()
+                file_maps.append(FileMap(
+                    module_id=module.module_id,
+                    files={
+                        f"src/main/java/com/vibeforge/{pkg}/{module.name}.java":
+                            f"// SYNTHESIS FAILED: {module.name}",
+                    },
+                ))
+    else:
+        # Phase 0 stub fallback
+        for idx, module in enumerate(state.module_plan):
+            state = _emit(state, "synthesize_node", GenerationPhase.SYNTHESIZING, {
+                "status": "synthesizing", "module": module.name,
+                "index": idx + 1, "total": len(state.module_plan),
+            })
+            pkg = module.name.lower()
+            file_maps.append(FileMap(
+                module_id=module.module_id,
+                files={
+                    f"src/main/java/com/vibeforge/{pkg}/{module.name}.java":
+                        f"// STUB: {module.name}\npublic class {module.name} {{}}",
+                    f"src/test/java/com/vibeforge/{pkg}/{module.name}Test.java":
+                        f"// STUB test: {module.name}",
+                },
+            ))
+
     state.file_maps = file_maps
     state = _emit(state, "synthesize_node", GenerationPhase.SYNTHESIZING,
                   {"status": "complete", "module_count": len(file_maps)})
@@ -358,31 +446,50 @@ def node_synthesize(state: GenerationState) -> dict:
 
 def node_assemble(state: GenerationState) -> dict:
     """
-    Merge per-module file maps. Deterministic conflict detection.
-    Conflicts are FLAGGED in the GateReport — never silently overwritten.
+    Merge per-module FileMaps. Deterministic conflict detection. Zero LLM.
+    Phase 2: uses real Assembler with strict path validation.
+    Conflicts FLAGGED in AssemblyResult — never silently overwritten.
     """
     state = _emit(state, "assemble_node", GenerationPhase.ASSEMBLING, {"status": "started"})
     state.current_phase = GenerationPhase.ASSEMBLING
 
-    assembled: dict[str, str] = {}
-    conflicts: list[str] = []
-    assembled.update(state.scaffold_files)
+    if _PHASE2_AVAILABLE:
+        from agents.generation.synthesizer import FileMapOutput as FMO, SynthesizedFile
+        assembler = Assembler()
+        # Convert state.file_maps (FileMap Pydantic) to FileMapOutput objects
+        fmo_list = []
+        for fm in state.file_maps:
+            fmo = FMO(module_id=fm.module_id, module_name=fm.module_id)
+            for path, code in fm.files.items():
+                fmo.files.append(SynthesizedFile(filename=path, content=code))
+            fmo_list.append(fmo)
 
-    for fm in state.file_maps:
-        for path, code in fm.files.items():
-            if path in assembled and path not in state.scaffold_files:
-                conflicts.append(path)
-                logger.warning("[ASSEMBLE] Conflict: %s", path)
-            else:
-                assembled[path] = code
-
-    state.assembled_files   = assembled
-    state.assembly_conflicts = conflicts
+        result = assembler.assemble(
+            scaffold_files=state.scaffold_files,
+            module_outputs=fmo_list,
+        )
+        state.assembled_files   = result.assembled_files
+        state.assembly_conflicts = result.conflict_paths
+        conflicts = result.conflict_paths
+    else:
+        # Phase 0 fallback
+        assembled: dict[str, str] = {}
+        conflicts: list[str] = []
+        assembled.update(state.scaffold_files)
+        for fm in state.file_maps:
+            for path, code in fm.files.items():
+                if path in assembled and path not in state.scaffold_files:
+                    conflicts.append(path)
+                    logger.warning("[ASSEMBLE] Conflict: %s", path)
+                else:
+                    assembled[path] = code
+        state.assembled_files   = assembled
+        state.assembly_conflicts = conflicts
 
     state = _emit(state, "assemble_node", GenerationPhase.ASSEMBLING, {
-        "status":    "complete" if not conflicts else "conflicts_detected",
-        "file_count": len(assembled),
-        "conflicts":  conflicts,
+        "status":     "complete" if not conflicts else "conflicts_detected",
+        "file_count":  len(state.assembled_files),
+        "conflicts":   conflicts,
     })
     return state.model_dump()
 
@@ -431,7 +538,7 @@ def node_gate(state: GenerationState) -> dict:
 def node_reviewer(state: GenerationState) -> dict:
     """
     Reads GateReport facts → writes FixPlan.
-    Phase 0 stub. Phase 2: Qwen3-8B reads the real report.
+    Phase 2: ReviewerAgent (Qwen3-8B) maps errors to modules.
     No vibes-based scoring — only machine-readable gate output.
     """
     state = _emit(state, "reviewer_node", GenerationPhase.REVIEWING, {"status": "started"})
@@ -441,10 +548,48 @@ def node_reviewer(state: GenerationState) -> dict:
     if not gate or gate.passed:
         return state.model_dump()
 
-    files_to_fix = gate.failing_files or ["src/main/java/com/vibeforge/stub/Stub.java"]
-    errors_by_file = {f: ["Compile/test failure — see gate report"] for f in files_to_fix}
-    next_iter      = state.fix_iteration + 1
-    esc_rec        = next_iter >= state.max_fix_iterations
+    next_iter = state.fix_iteration + 1
+    esc_rec   = next_iter >= state.max_fix_iterations
+
+    if _PHASE2_AVAILABLE and state.llm_client:
+        import asyncio
+        from agents.generation.assembler import Assembler, AssemblyResult
+        from agents.generation.synthesizer import FileMapOutput as FMO, SynthesizedFile
+
+        # Rebuild AssemblyResult from state
+        ar = AssemblyResult(
+            assembled_files=dict(state.assembled_files),
+            scaffold_files=dict(state.scaffold_files),
+        )
+        # Rebuild file_ownership from assembly_conflicts info (simplified)
+        for path in state.assembled_files:
+            ar.file_ownership[path] = "__unknown__"
+
+        spec_dict = getattr(state, "spec_snapshot", {}) or {}
+        reviewer = ReviewerAgent(state.llm_client)
+        try:
+            rev_out = asyncio.get_event_loop().run_until_complete(
+                reviewer.review(
+                    gate_result=gate,
+                    assembly_result=ar,
+                    spec_dict=spec_dict,
+                    fix_iteration=next_iter,
+                    max_iterations=state.max_fix_iterations,
+                    job_id=state.job_id,
+                )
+            )
+            files_to_fix = [i.file_path for i in rev_out.fix_instructions]
+            errors_by_file = {
+                i.file_path: i.errors for i in rev_out.fix_instructions
+            }
+            esc_rec = rev_out.escalation_recommended or esc_rec
+        except Exception as e:
+            logger.error("[node_reviewer] Phase 2 reviewer failed: %s — fallback", e)
+            files_to_fix = gate.failing_files or []
+            errors_by_file = {f: ["Gate failure"] for f in files_to_fix}
+    else:
+        files_to_fix = gate.failing_files or ["src/main/java/com/vibeforge/stub/Stub.java"]
+        errors_by_file = {f: ["Compile/test failure — see gate report"] for f in files_to_fix}
 
     state.fix_plan = FixPlan(
         files_to_fix=files_to_fix,
@@ -454,9 +599,10 @@ def node_reviewer(state: GenerationState) -> dict:
         failure_classification="capability_bound" if esc_rec else "mechanical",
     )
     state = _emit(state, "reviewer_node", GenerationPhase.REVIEWING, {
-        "status":        "complete",
-        "files_to_fix":  files_to_fix,
+        "status":         "complete",
+        "files_to_fix":   files_to_fix,
         "next_iteration": next_iter,
+        "escalate":       esc_rec,
     })
     return state.model_dump()
 
@@ -467,30 +613,73 @@ def node_fixer(state: GenerationState) -> dict:
     """
     Regenerates ONLY the files in the FixPlan.
     CONTRACT C5: prompt ALWAYS contains the concrete GateReport errors.
-    Phase 0 stub. Phase 2: Qwen2.5-Coder-32B with real errors in-prompt.
+    Phase 2: FixerAgent (Qwen2.5-Coder-32B) with real errors in-prompt.
     """
     iteration = state.fix_plan.iteration if state.fix_plan else state.fix_iteration + 1
+    gate_errors = dict(state.fix_plan.errors_by_file) if state.fix_plan else {}
+
     state = _emit(state, "fixer_node", GenerationPhase.FIXING, {
-        "status":    "started",
-        "iteration": iteration,
-        "max":       state.max_fix_iterations,
-        # C5: gate errors always in this payload
-        "gate_errors": {
-            f: errs
-            for f, errs in (state.fix_plan.errors_by_file.items() if state.fix_plan else {})
-        },
+        "status":      "started",
+        "iteration":   iteration,
+        "max":         state.max_fix_iterations,
+        "gate_errors": gate_errors,   # C5: ALWAYS present
     })
     state.current_phase = GenerationPhase.FIXING
     state.job_status    = JobStatus.FIXING
     state.fix_iteration = iteration
-    state.fix_count     = iteration   # keep test-facing alias in sync
+    state.fix_count     = iteration
 
-    if state.fix_plan:
-        for fpath in state.fix_plan.files_to_fix:
-            state.assembled_files[fpath] = (
-                f"// STUB FIXED (iteration {iteration}): {fpath}\n"
-                "// Gate errors were in this prompt — loop converges on facts."
+    if _PHASE2_AVAILABLE and state.llm_client and state.fix_plan:
+        import asyncio
+        from agents.generation.assembler import Assembler, AssemblyResult
+        from agents.generation.reviewer_fixer import ReviewerAgent, FixerAgent
+        from agents.generation.reviewer_fixer import FileFixInstruction, ReviewerOutput
+
+        fixer = FixerAgent(state.llm_client, stack_profile=state.stack_profile)
+        ar = AssemblyResult(assembled_files=dict(state.assembled_files))
+
+        # Build ReviewerOutput from fix_plan for fixer
+        instructions = [
+            FileFixInstruction(
+                file_path=fpath,
+                module_id="unknown",
+                errors=errs,
+                fix_guidance="Fix the exact errors listed",
+                error_source="compile",
             )
+            for fpath, errs in gate_errors.items()
+        ]
+        rev_out = ReviewerOutput(fix_instructions=instructions)
+
+        try:
+            fixed_maps = asyncio.get_event_loop().run_until_complete(
+                fixer.fix(
+                    reviewer_output=rev_out,
+                    assembly_result=ar,
+                    fix_iteration=iteration,
+                    job_id=state.job_id,
+                )
+            )
+            assembler = Assembler()
+            from agents.generation.synthesizer import FileMapOutput as FMO
+            new_result = assembler.apply_fixes(ar, fixed_maps)
+            state.assembled_files = new_result.assembled_files
+            logger.info("[node_fixer] Phase 2 fixed %d files", len(fixed_maps))
+        except Exception as e:
+            logger.error("[node_fixer] Phase 2 fixer failed: %s — stub fallback", e)
+            if state.fix_plan:
+                for fpath in state.fix_plan.files_to_fix:
+                    state.assembled_files[fpath] = (
+                        f"// FIX FAILED (iteration {iteration}): {fpath}"
+                    )
+    else:
+        # Phase 0 stub fallback
+        if state.fix_plan:
+            for fpath in state.fix_plan.files_to_fix:
+                state.assembled_files[fpath] = (
+                    f"// STUB FIXED (iteration {iteration}): {fpath}\n"
+                    "// Gate errors were in this prompt — loop converges on facts."
+                )
 
     state = _emit(state, "fixer_node", GenerationPhase.FIXING,
                   {"status": "complete", "iteration": iteration})

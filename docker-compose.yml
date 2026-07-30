@@ -354,6 +354,186 @@ services:
     networks:
       - vibeforge
 
+  # ===========================================================================
+  # OLLAMA — Local LLM inference (qwen3:8b)
+  # First run: pulls qwen3:8b model (~5GB). Subsequent starts are instant.
+  # GPU: mount /dev/nvidia* and set runtime: nvidia if a GPU is available.
+  # ===========================================================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: vibeforge-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - vibeforge
+
+  # ---------------------------------------------------------------------------
+  # OLLAMA INIT — pulls qwen3:8b on first boot (one-shot)
+  # Streams the pull response; exits 0 when model is ready.
+  # docker compose up --no-recreate skips this on subsequent runs.
+  # ---------------------------------------------------------------------------
+  ollama-init:
+    image: curlimages/curl:latest
+    container_name: vibeforge-ollama-init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        echo '[ollama-init] Pulling qwen3:8b (5GB — first run only)...';
+        curl -X POST http://ollama:11434/api/pull
+             -H 'Content-Type: application/json'
+             -d '{\"name\":\"qwen3:8b\"}'
+             --max-time 1200;
+        echo '[ollama-init] qwen3:8b ready.';
+      "
+    networks:
+      - vibeforge
+    restart: "no"
+
+  # ===========================================================================
+  # LITELLM — LLM proxy (Contract C11: routing + budget + Langfuse logging)
+  # All agent calls target: http://litellm:4000/v1/chat/completions
+  # Model alias: "agent-model" → qwen3:8b on Ollama
+  # UI: http://localhost:4001
+  # ===========================================================================
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: vibeforge-litellm
+    restart: unless-stopped
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--detailed_debug"]
+    volumes:
+      - ./infra/litellm/config.yaml:/app/config.yaml:ro
+    ports:
+      - "4000:4000"    # OpenAI-compatible API
+    env_file: .env
+    environment:
+      # Override DB URL for LiteLLM's own tables
+      DATABASE_URL: "postgresql://vibeforge:${POSTGRES_PASSWORD:-vibeforge_dev_secret}@postgres:5432/litellm"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4000/health || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - vibeforge
+
+  # ===========================================================================
+  # INGESTION — RAG pipeline: MinIO → Docling → bge-m3 → Qdrant
+  # Polls vf-docs bucket every 30s. Object key convention: {tenant_id}/{file}
+  # Prometheus metrics on port 9001.
+  # model_cache volume shared with retrieval to avoid double download of bge-m3.
+  # ===========================================================================
+  ingestion:
+    build:
+      context: ./services/ingestion
+      dockerfile: Dockerfile
+    container_name: vibeforge-ingestion
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      QDRANT_URL: "http://qdrant:6333"
+      MINIO_ENDPOINT: "minio:9000"
+      INGESTION_POLL_INTERVAL: "30"
+      INGESTION_METRICS_PORT: "9001"
+      DATABASE_URL_SYNC: "postgresql://vibeforge:${POSTGRES_PASSWORD:-vibeforge_dev_secret}@postgres:5432/vibeforge"
+    volumes:
+      - ./services/ingestion:/app
+      - model_cache:/root/.cache   # shared HuggingFace model cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    networks:
+      - vibeforge
+
+  # ===========================================================================
+  # RETRIEVAL — RAG query service: Qdrant search with tenant isolation (C8)
+  # POST /retrieve → top-5 chunks for a query, scoped to tenant_id
+  # Prometheus metrics on port 9002.
+  # ===========================================================================
+  retrieval:
+    build:
+      context: ./services/retrieval
+      dockerfile: Dockerfile
+    container_name: vibeforge-retrieval
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      QDRANT_URL: "http://qdrant:6333"
+      RETRIEVAL_METRICS_PORT: "9002"
+    ports:
+      - "8001:8001"    # REST API
+    volumes:
+      - ./services/retrieval:/app
+      - model_cache:/root/.cache   # shared with ingestion
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8001/health || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 180s    # bge-m3 download on first run
+    networks:
+      - vibeforge
+
+  # ===========================================================================
+  # UI — Streamlit frontend
+  # Spec Sheet: option graph form + live impact panel
+  # Review Workspace: diff cards + Lock & Generate button
+  # URL: http://localhost:8501
+  # ===========================================================================
+  ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+    container_name: vibeforge-ui
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      API_BASE_URL: "http://api:8000"
+      KEYCLOAK_URL: "http://keycloak:8080"
+      KEYCLOAK_REALM: "vibeforge"
+      KC_CLIENT_ID: "vibeforge-api"
+      KC_CLIENT_SECRET: "${KEYCLOAK_CLIENT_SECRET:-vibeforge-api-secret-change-me}"
+      DEV_USERNAME: "${DEV_ADMIN_EMAIL:-admin@vibeforge.local}"
+      DEV_PASSWORD: "${DEV_ADMIN_PASSWORD:-admin123}"
+    ports:
+      - "8501:8501"    # Streamlit UI
+    volumes:
+      - ./ui:/app      # hot-reload
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8501/_stcore/health || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - vibeforge
+
 # =============================================================================
 # VOLUMES — named volumes for persistence
 # =============================================================================
@@ -370,6 +550,10 @@ volumes:
     name: vibeforge_prometheus_data
   grafana_data:
     name: vibeforge_grafana_data
+  ollama_data:
+    name: vibeforge_ollama_data      # qwen3:8b model weights (~5GB)
+  model_cache:
+    name: vibeforge_model_cache      # HuggingFace bge-m3 cache shared by ingestion + retrieval
 
 # =============================================================================
 # NETWORKS

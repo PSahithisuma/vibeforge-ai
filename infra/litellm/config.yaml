@@ -1,0 +1,117 @@
+# =============================================================================
+# LiteLLM Proxy Configuration — VibeForge
+#
+# Contract C11: Every LLM call is routed through this proxy.
+#   - All agent code targets model alias "agent-model"
+#   - Proxy resolves to qwen3:8b on local Ollama
+#   - Every call is logged to Langfuse for observability
+#   - Budget cap enforced per virtual key
+#   - Cost tracked even for local models (token-based proxy cost = $0 but
+#     token counts are recorded for governance)
+#
+# Endpoints:
+#   Chat:    POST http://litellm:4000/v1/chat/completions
+#   Models:  GET  http://litellm:4000/v1/models
+#   Health:  GET  http://litellm:4000/health
+#   Metrics: GET  http://litellm:4000/metrics  (Prometheus)
+# =============================================================================
+
+model_list:
+
+  # ---------------------------------------------------------------------------
+  # Primary agent model — Qwen3 8B via Ollama (local, zero egress cost)
+  # All agent orchestration calls use this alias.
+  # ---------------------------------------------------------------------------
+  - model_name: agent-model
+    litellm_params:
+      model: ollama/qwen3:8b
+      api_base: http://ollama:11434
+      stream: true
+      timeout: 120
+      max_retries: 2
+
+  # ---------------------------------------------------------------------------
+  # Fast model — used for simple classification, routing, and gate decisions
+  # Points to the same Ollama instance with a lower-param model option.
+  # ---------------------------------------------------------------------------
+  - model_name: fast-model
+    litellm_params:
+      model: ollama/qwen3:8b     # same model for now; swap to qwen3:1.7b when available
+      api_base: http://ollama:11434
+      stream: true
+      timeout: 30
+      max_retries: 1
+
+  # ---------------------------------------------------------------------------
+  # Embedding model — bge-m3 via Ollama (for retrieval-augmented generation)
+  # Note: actual embedding is done by the retrieval service directly;
+  #       this entry is here for completeness / future LiteLLM embedding calls.
+  # ---------------------------------------------------------------------------
+  - model_name: embed-model
+    litellm_params:
+      model: ollama/bge-m3
+      api_base: http://ollama:11434
+      timeout: 60
+
+
+# =============================================================================
+# LiteLLM-wide settings
+# =============================================================================
+litellm_settings:
+  # Observability — log every call to Langfuse (Phase 1: wired up and live)
+  success_callback: ["langfuse"]
+  failure_callback: ["langfuse"]
+
+  # Don't fail on unknown parameters (Ollama ignores some OpenAI params)
+  drop_params: true
+
+  # Reduce noise in logs
+  set_verbose: false
+
+  # Request-level timeout guard
+  request_timeout: 180
+
+  # Telemetry — disable LiteLLM's own usage reporting
+  telemetry: false
+
+
+# =============================================================================
+# General / server settings
+# =============================================================================
+general_settings:
+  # Master API key used internally by VibeForge services.
+  # Each agent gets a scoped virtual key with budget limits (Contract C11).
+  master_key: "sk-vibeforge-litellm-dev-change-me"
+
+  # Database for key management + spend tracking
+  # Reuses the vibeforge Postgres instance (litellm DB created by 00_create_dbs.sh)
+  database_url: "postgresql://vibeforge:vibeforge_dev_secret@postgres:5432/litellm"
+
+  # Budget enforcement — Contract C11
+  # Local Ollama models have $0 real cost, but we track tokens and enforce
+  # a "virtual" budget cap to prevent runaway generation loops.
+  max_budget: 0.0             # $0 for local models (no real spend)
+  budget_duration: "30d"      # reset virtual budget monthly
+
+  # Store all request/response logs for audit
+  store_model_in_db: true
+
+  # Allow UI key management at http://litellm:4000/ui
+  ui_access_mode: "all"
+  ui_username: "admin"
+  ui_password: "admin"
+
+
+# =============================================================================
+# Environment variables injected at runtime (from .env via docker-compose)
+# These are read by LiteLLM's Langfuse callback handler.
+# =============================================================================
+environment_variables:
+  # Langfuse — LLM observability (tracing, evals)
+  # Keys are generated in the Langfuse UI at http://localhost:3001
+  LANGFUSE_SECRET_KEY: "sk-lf-vibeforge-dev-secret"
+  LANGFUSE_PUBLIC_KEY: "pk-lf-vibeforge-dev-public"
+  LANGFUSE_HOST: "http://langfuse:3000"
+
+  # Ollama host (override if running Ollama externally)
+  OLLAMA_API_BASE: "http://ollama:11434"

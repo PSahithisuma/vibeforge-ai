@@ -12,3 +12,18 @@ scrape_configs:
     static_configs:
       - targets: ["worker:9000"]
     metrics_path: /metrics
+
+  - job_name: vibeforge-ingestion
+    static_configs:
+      - targets: ["ingestion:9001"]
+    metrics_path: /metrics
+
+  - job_name: vibeforge-retrieval
+    static_configs:
+      - targets: ["retrieval:9002"]   # prometheus-fastapi-instrumentator
+    metrics_path: /metrics
+
+  - job_name: vibeforge-litellm
+    static_configs:
+      - targets: ["litellm:4000"]
+    metrics_path: /metrics

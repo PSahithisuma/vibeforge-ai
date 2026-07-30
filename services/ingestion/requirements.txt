@@ -1,0 +1,10 @@
+# VibeForge Ingestion Service — dependencies
+# Heavy: includes Docling (IBM layout parser) + bge-m3 (BAAI dense embedder)
+# First-container cold-start: ~3-5 min for model downloads
+docling==2.15.0
+FlagEmbedding==1.3.3
+qdrant-client==1.9.2
+minio==7.2.10
+asyncpg==0.30.0
+prometheus-client==0.21.0
+structlog==24.4.0

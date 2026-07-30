@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import logging
 from datetime import datetime, timezone
 
@@ -27,13 +28,24 @@ async def run_dummy_job(ctx: dict, *, job_id: str, tenant_id: str) -> dict:
     3. Each phase writes a job_event row to Postgres AND publishes to Redis
        pub/sub so the SSE endpoint gets it instantly.
     4. Marks the job 'completed'.
+    5. Records Prometheus metrics (active_jobs, job_duration).
 
     ctx keys:
-      db_pool  — asyncpg.Pool (created in on_startup)
-      redis    — ArqRedis (inherits from redis.asyncio.Redis)
+      db_pool            — asyncpg.Pool
+      redis              — ArqRedis
+      active_jobs_gauge  — prometheus_client.Gauge (optional, safe if absent)
+      job_duration_hist  — prometheus_client.Histogram (optional)
+      jobs_processed_ctr — prometheus_client.Counter (optional)
     """
-    pool = ctx["db_pool"]
-    redis = ctx["redis"]
+    pool    = ctx["db_pool"]
+    redis   = ctx["redis"]
+    t_start = time.monotonic()
+    status  = "completed"
+
+    # Track active jobs
+    active_gauge = ctx.get("active_jobs_gauge")
+    if active_gauge:
+        active_gauge.inc()
 
     logger.info("job_start job_id=%s tenant_id=%s", job_id, tenant_id)
 
@@ -105,4 +117,16 @@ async def run_dummy_job(ctx: dict, *, job_id: str, tenant_id: str) -> dict:
     )
 
     logger.info("job_complete job_id=%s", job_id)
-    return {"status": "completed", "job_id": job_id}
+
+    # Record Prometheus metrics
+    elapsed = time.monotonic() - t_start
+    if active_gauge:
+        active_gauge.dec()
+    duration_hist = ctx.get("job_duration_hist")
+    if duration_hist:
+        duration_hist.labels(job_type="generation", status=status).observe(elapsed)
+    jobs_ctr = ctx.get("jobs_processed_ctr")
+    if jobs_ctr:
+        jobs_ctr.labels(job_type="generation", status=status).inc()
+
+    return {"status": status, "job_id": job_id}

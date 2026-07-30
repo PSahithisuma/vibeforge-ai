@@ -7,6 +7,7 @@ import os
 import asyncpg
 from arq import run_worker
 from arq.connections import RedisSettings
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
 from tasks.dummy import run_dummy_job
 
@@ -35,6 +36,29 @@ _PG_DSN = _DB_URL.replace("postgresql+asyncpg://", "postgresql://")
 _REDIS_HOST     = _env("REDIS_HOST", "redis")
 _REDIS_PORT     = int(_env("REDIS_PORT", "6379"))
 _REDIS_PASSWORD = _env("REDIS_PASSWORD", "redis_dev_secret")
+_METRICS_PORT   = int(_env("WORKER_METRICS_PORT", "9000"))
+
+# =============================================================================
+# Prometheus worker metrics
+# =============================================================================
+
+WORKER_ACTIVE_JOBS = Gauge(
+    "vibeforge_worker_active_jobs",
+    "Number of jobs currently being processed by this worker",
+)
+
+WORKER_JOB_DURATION = Histogram(
+    "vibeforge_worker_job_duration_seconds",
+    "Time taken to process a job end-to-end",
+    ["job_type", "status"],
+    buckets=[1, 2, 5, 10, 30, 60, 120, 300],
+)
+
+WORKER_JOBS_PROCESSED = Counter(
+    "vibeforge_worker_jobs_processed_total",
+    "Total jobs processed by this worker",
+    ["job_type", "status"],
+)
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +69,11 @@ async def startup(ctx: dict) -> None:
     """
     Create a shared asyncpg connection pool available to all task functions
     via ctx["db_pool"]. Called once when the Arq worker process starts.
+    Also starts the Prometheus metrics HTTP server on WORKER_METRICS_PORT.
     """
+    logger.info("worker startup: starting Prometheus metrics server on port %d", _METRICS_PORT)
+    start_http_server(_METRICS_PORT)
+
     logger.info("worker startup: connecting to Postgres…")
     ctx["db_pool"] = await asyncpg.create_pool(
         dsn=_PG_DSN,
@@ -53,6 +81,10 @@ async def startup(ctx: dict) -> None:
         max_size=10,
         command_timeout=30,
     )
+    # Expose metrics references in ctx so tasks can update them
+    ctx["active_jobs_gauge"]   = WORKER_ACTIVE_JOBS
+    ctx["job_duration_hist"]   = WORKER_JOB_DURATION
+    ctx["jobs_processed_ctr"]  = WORKER_JOBS_PROCESSED
     logger.info("worker startup: ready")
 
 

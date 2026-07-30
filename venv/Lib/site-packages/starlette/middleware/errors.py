@@ -4,12 +4,13 @@ import html
 import inspect
 import sys
 import traceback
+import typing
 
 from starlette._utils import is_async_callable
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, PlainTextResponse, Response
-from starlette.types import ASGIApp, ExceptionHandler, Message, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 STYLES = """
 p {
@@ -139,7 +140,7 @@ class ServerErrorMiddleware:
     def __init__(
         self,
         app: ASGIApp,
-        handler: ExceptionHandler | None = None,
+        handler: typing.Callable[[Request, Exception], typing.Any] | None = None,
         debug: bool = False,
     ) -> None:
         self.app = app
@@ -173,9 +174,9 @@ class ServerErrorMiddleware:
             else:
                 # Use an installed 500 error handler.
                 if is_async_callable(self.handler):
-                    response = await self.handler(request, exc)  # type: ignore[assignment, arg-type]
+                    response = await self.handler(request, exc)
                 else:
-                    response = await run_in_threadpool(self.handler, request, exc)  # type: ignore[arg-type]
+                    response = await run_in_threadpool(self.handler, request, exc)
 
             if not response_started:
                 await response(scope, receive, send)

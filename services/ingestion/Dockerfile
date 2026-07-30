@@ -11,8 +11,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
+# Install uv — uses PubGrub resolver (no backtracking depth limit).
+# pip's default resolver hits ResolutionTooDeep when docling + FlagEmbedding
+# both pull huggingface_hub with conflicting transitive bounds.
+RUN pip install --quiet uv
+
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN uv pip install --system --no-cache -r requirements.txt
 
 COPY . .
 

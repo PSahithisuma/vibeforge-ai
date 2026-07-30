@@ -57,3 +57,7 @@ dist/
 
 # ── Keycloak export cache (auto-generated) ────────────────────────────────
 infra/keycloak/export/
+
+venv/
+__pycache__/
+*.pyc

@@ -1,0 +1,16 @@
+# VibeForge Ingestion Service — dependencies
+# Heavy: includes Docling (IBM layout parser) + bge-m3 (BAAI dense embedder)
+# First-container cold-start: ~3-5 min for model downloads
+#
+# huggingface_hub is pinned explicitly because pip's resolver hits
+# ResolutionTooDeep(200000) when docling + FlagEmbedding both pull it
+# with conflicting transitive bounds. We use uv (PubGrub) in the Dockerfile
+# which resolves this, but the pin keeps things deterministic across rebuilds.
+huggingface_hub==0.27.1
+docling==2.15.0
+FlagEmbedding==1.3.3
+qdrant-client==1.9.2
+minio==7.2.10
+asyncpg==0.30.0
+prometheus-client==0.21.0
+structlog==24.4.0

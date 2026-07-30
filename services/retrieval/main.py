@@ -50,18 +50,35 @@ EMBED_DIM     = 1024  # bge-m3 dense vector dimension
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Prometheus
+# Guard each metric against duplicate registration — happens when the container
+# crashes and uvicorn restarts the process within the same Python runtime.
 # ──────────────────────────────────────────────────────────────────────────────
-RETRIEVE_REQUESTS = Counter(
+from prometheus_client import REGISTRY  # noqa: E402
+
+def _counter(name, doc, labels=()):
+    try:
+        return Counter(name, doc, list(labels))
+    except ValueError:
+        return REGISTRY._names_to_collectors.get(name)
+
+def _histogram(name, doc, buckets=None):
+    kwargs = {"buckets": buckets} if buckets else {}
+    try:
+        return Histogram(name, doc, **kwargs)
+    except ValueError:
+        return REGISTRY._names_to_collectors.get(name)
+
+RETRIEVE_REQUESTS = _counter(
     "vibeforge_retrieval_requests_total",
     "Total retrieval requests",
     ["tenant_id", "result"],
 )
-RETRIEVE_DURATION = Histogram(
+RETRIEVE_DURATION = _histogram(
     "vibeforge_retrieval_duration_seconds",
     "End-to-end latency of a retrieval call",
     buckets=[0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0],
 )
-CHUNKS_RETURNED = Counter(
+CHUNKS_RETURNED = _counter(
     "vibeforge_retrieval_chunks_returned_total",
     "Total chunks returned across all retrieval requests",
 )

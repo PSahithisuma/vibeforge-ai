@@ -1,123 +1,133 @@
+"""
+VibeForge — Arq Worker (Phase 1 wired)
+=======================================
+Arq background worker. Picks up jobs from Redis and runs them.
+
+Tasks registered:
+    run_generation   — full generation pipeline (real agents)
+    validate_spec    — completeness check + gap questions only
+    dummy_job        — kept for smoke testing
+
+Start:
+    python worker.py
+"""
+
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 
-import asyncpg
-from arq import run_worker
+from arq import cron
 from arq.connections import RedisSettings
-from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
-from tasks.dummy import run_dummy_job
-
+logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
-)
-logger = logging.getLogger("vibeforge.worker")
-
-
-# ---------------------------------------------------------------------------
-# Read config from environment (same vars as API service via docker-compose)
-# ---------------------------------------------------------------------------
-
-def _env(key: str, default: str = "") -> str:
-    return os.environ.get(key, default)
-
-
-_DB_URL = _env(
-    "DATABASE_URL",
-    "postgresql+asyncpg://vibeforge:vibeforge_dev_secret@postgres:5432/vibeforge",
-)
-# asyncpg create_pool uses postgresql:// — strip the SQLAlchemy prefix
-_PG_DSN = _DB_URL.replace("postgresql+asyncpg://", "postgresql://")
-
-_REDIS_HOST     = _env("REDIS_HOST", "redis")
-_REDIS_PORT     = int(_env("REDIS_PORT", "6379"))
-_REDIS_PASSWORD = _env("REDIS_PASSWORD", "redis_dev_secret")
-_METRICS_PORT   = int(_env("WORKER_METRICS_PORT", "9000"))
-
-# =============================================================================
-# Prometheus worker metrics
-# =============================================================================
-
-WORKER_ACTIVE_JOBS = Gauge(
-    "vibeforge_worker_active_jobs",
-    "Number of jobs currently being processed by this worker",
+    format="%(asctime)s %(levelname)-7s %(name)s — %(message)s",
 )
 
-WORKER_JOB_DURATION = Histogram(
-    "vibeforge_worker_job_duration_seconds",
-    "Time taken to process a job end-to-end",
-    ["job_type", "status"],
-    buckets=[1, 2, 5, 10, 30, 60, 120, 300],
-)
-
-WORKER_JOBS_PROCESSED = Counter(
-    "vibeforge_worker_jobs_processed_total",
-    "Total jobs processed by this worker",
-    ["job_type", "status"],
-)
+# ── Redis settings ─────────────────────────────────────────────────────────────
+REDIS_HOST     = os.getenv("REDIS_HOST", "redis")
+REDIS_PORT     = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "redis_dev_secret")
+REDIS_DB       = int(os.getenv("REDIS_DB", "0"))
 
 
-# ---------------------------------------------------------------------------
-# Lifecycle hooks
-# ---------------------------------------------------------------------------
+# ── Startup / shutdown hooks ───────────────────────────────────────────────────
 
-async def startup(ctx: dict) -> None:
-    """
-    Create a shared asyncpg connection pool available to all task functions
-    via ctx["db_pool"]. Called once when the Arq worker process starts.
-    Also starts the Prometheus metrics HTTP server on WORKER_METRICS_PORT.
-    """
-    logger.info("worker startup: starting Prometheus metrics server on port %d", _METRICS_PORT)
-    start_http_server(_METRICS_PORT)
-
-    logger.info("worker startup: connecting to Postgres…")
-    ctx["db_pool"] = await asyncpg.create_pool(
-        dsn=_PG_DSN,
-        min_size=2,
-        max_size=10,
-        command_timeout=30,
-    )
-    # Expose metrics references in ctx so tasks can update them
-    ctx["active_jobs_gauge"]   = WORKER_ACTIVE_JOBS
-    ctx["job_duration_hist"]   = WORKER_JOB_DURATION
-    ctx["jobs_processed_ctr"]  = WORKER_JOBS_PROCESSED
-    logger.info("worker startup: ready")
+async def startup(ctx):
+    logger.info("[Worker] Starting up — Redis %s:%d", REDIS_HOST, REDIS_PORT)
 
 
-async def shutdown(ctx: dict) -> None:
-    """Close the DB pool cleanly on Ctrl-C or SIGTERM."""
-    pool: asyncpg.Pool | None = ctx.get("db_pool")
-    if pool:
-        await pool.close()
-    logger.info("worker shutdown: pool closed")
+async def shutdown(ctx):
+    logger.info("[Worker] Shutting down")
 
 
-# ---------------------------------------------------------------------------
-# Arq WorkerSettings — the entry point Arq reads
-# ---------------------------------------------------------------------------
+# ── Task imports ───────────────────────────────────────────────────────────────
+
+async def dummy_job(ctx, job_id: str, **kwargs) -> dict:
+    """Smoke-test task — kept for CI and health checks."""
+    import asyncio
+    logger.info("[Worker] dummy_job %s", job_id)
+
+    steps = [
+        ("planning",    "started",  {"message": "Planning modules"}),
+        ("planning",    "complete", {"message": "Plan ready", "module_count": 3}),
+        ("synthesizing","started",  {"message": "Synthesizing code"}),
+        ("synthesizing","complete", {"message": "Code generated", "files": 9}),
+        ("gate",        "passed",   {"message": "QA gate passed"}),
+        ("delivery",    "complete", {"message": "Done"}),
+    ]
+
+    try:
+        import asyncpg
+        DATABASE_URL = os.getenv(
+            "DATABASE_URL",
+            "postgresql://vibeforge:vibeforge_dev_secret@postgres:5432/vibeforge"
+        )
+        conn = await asyncpg.connect(DATABASE_URL)
+        try:
+            for phase, status, data in steps:
+                await asyncio.sleep(0.5)
+                import json
+                await conn.execute(
+                    "INSERT INTO job_events (job_id, phase, status, data, created_at) "
+                    "VALUES ($1, $2, $3, $4, NOW())",
+                    job_id, phase, status, json.dumps(data),
+                )
+            await conn.execute(
+                "UPDATE jobs SET status='completed', finished_at=NOW(), updated_at=NOW() WHERE id=$1",
+                job_id,
+            )
+        finally:
+            await conn.close()
+    except Exception as e:
+        logger.warning("[Worker] dummy_job DB write failed: %s — continuing", e)
+
+    return {"status": "completed", "job_id": job_id}
+
+
+# ── Real generation tasks ──────────────────────────────────────────────────────
+
+async def run_generation(ctx, job_id: str, tenant_id: str, spec_data: dict) -> dict:
+    """Full generation pipeline — calls real agents."""
+    from tasks.generation import run_generation as _run
+    return await _run(ctx, job_id=job_id, tenant_id=tenant_id, spec_data=spec_data)
+
+
+async def validate_spec(ctx, job_id: str, tenant_id: str, spec_data: dict) -> dict:
+    """Completeness validation + gap questions — no generation."""
+    from tasks.generation import validate_spec as _validate
+    return await _validate(ctx, job_id=job_id, tenant_id=tenant_id, spec_data=spec_data)
+
+
+# ── Arq worker settings ────────────────────────────────────────────────────────
 
 class WorkerSettings:
-    functions      = [run_dummy_job]
+    functions = [
+        dummy_job,
+        run_generation,
+        validate_spec,
+    ]
+
     redis_settings = RedisSettings(
-        host=_REDIS_HOST,
-        port=_REDIS_PORT,
-        password=_REDIS_PASSWORD,
-        database=0,
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        password=REDIS_PASSWORD,
+        database=REDIS_DB,
     )
+
     on_startup  = startup
     on_shutdown = shutdown
-    max_jobs    = 10
-    job_timeout = 300   # 5-minute hard limit per job
-    keep_result = 3600  # keep Arq result key in Redis for 1 hour
+
+    max_jobs          = 5
+    job_timeout       = 3600   # 1 hour max per job
+    keep_result       = 3600   # keep results for 1 hour
+    poll_delay        = 0.5    # check Redis every 500ms
+    retry_jobs        = False  # don't auto-retry — generation is expensive
 
 
-# ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
+if __name__ == '__main__':
+    import asyncio
+    from arq import run_worker
     asyncio.run(run_worker(WorkerSettings))

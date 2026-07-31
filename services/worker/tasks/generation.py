@@ -35,8 +35,9 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # ── Path setup — agents/ must be importable from the worker container ──────────
-# The worker mounts the project root at /app, agents/ is at /app/agents/
-AGENTS_ROOT = Path(__file__).parent.parent.parent.parent  # /app
+# The worker mounts /app/worker as /app, and project root as /project
+# agents/ is at /project/agents/
+AGENTS_ROOT = Path(os.getenv("AGENTS_ROOT", "/project"))
 for p in [str(AGENTS_ROOT), str(AGENTS_ROOT / "agents"), str(AGENTS_ROOT / "core")]:
     if p not in sys.path:
         sys.path.insert(0, p)
@@ -80,15 +81,17 @@ async def write_event(
     phase: str,
     status: str,
     data: dict,
+    tenant_id: str = "00000000-0000-0000-0000-000000000001",
 ) -> None:
     """Write one progress event to job_events table."""
     try:
+        event_type = f"{phase}:{status}"
         await conn.execute(
             """
-            INSERT INTO job_events (job_id, phase, status, data, created_at)
-            VALUES ($1, $2, $3, $4, NOW())
+            INSERT INTO job_events (tenant_id, job_id, event_type, payload, created_at)
+            VALUES ($1, $2, $3, $4::jsonb, NOW())
             """,
-            job_id, phase, status, json.dumps(data),
+            tenant_id, job_id, event_type, json.dumps(data),
         )
     except Exception as e:
         logger.warning("[Worker] Could not write event: %s", e)
@@ -107,15 +110,15 @@ async def update_job_status(
             """
             UPDATE jobs
             SET status = $1,
-                result = $2,
-                error  = $3,
-                finished_at = CASE WHEN $1 IN ('completed', 'failed') THEN NOW() ELSE NULL END,
-                updated_at  = NOW()
+                result_ref   = $2,
+                error_detail = $3::jsonb,
+                finished_at  = CASE WHEN $1 IN ('completed', 'failed') THEN NOW() ELSE NULL END,
+                started_at   = CASE WHEN $1 = 'running' AND started_at IS NULL THEN NOW() ELSE started_at END
             WHERE id = $4
             """,
             status,
             json.dumps(result) if result else None,
-            error,
+            json.dumps({"error": error}) if error else None,
             job_id,
         )
     except Exception as e:
@@ -146,7 +149,7 @@ async def run_generation(ctx, job_id: str, tenant_id: str, spec_data: dict) -> d
         await write_event(conn, job_id, "startup", "started", {
             "message": "Generation job started",
             "job_id": job_id,
-        })
+                                    }, tenant_id)
 
         # ── Step 1: Import agents ─────────────────────────────────────────────
         try:
@@ -159,11 +162,11 @@ async def run_generation(ctx, job_id: str, tenant_id: str, spec_data: dict) -> d
 
             await write_event(conn, job_id, "startup", "agents_loaded", {
                 "message": "All agents loaded successfully",
-            })
+                                                    }, tenant_id)
         except ImportError as e:
             error_msg = f"Could not import agents: {e}"
             logger.error("[Worker] %s", error_msg)
-            await write_event(conn, job_id, "startup", "failed", {"error": error_msg})
+            await write_event(conn, job_id, "startup", "failed", {"error": error_msg}, tenant_id)
             await update_job_status(conn, job_id, "failed", error=error_msg)
             return {"status": "failed", "error": error_msg}
 
@@ -176,12 +179,12 @@ async def run_generation(ctx, job_id: str, tenant_id: str, spec_data: dict) -> d
         await write_event(conn, job_id, "startup", "llm_ready", {
             "message": f"LLM client wired to {LITELLM_BASE_URL}",
             "model": "agent-model → qwen3:8b via Ollama",
-        })
+                                    }, tenant_id)
 
         # ── Step 3: Run Completeness Validator Layer 1 (zero LLM) ────────────
         await write_event(conn, job_id, "validation", "started", {
             "message": "Running completeness checks",
-        })
+                                    }, tenant_id)
 
         validator = CompletenessValidator(llm_client=llm_client)
         layer1_result = validator.validate_sync(spec_data)
@@ -192,19 +195,19 @@ async def run_generation(ctx, job_id: str, tenant_id: str, spec_data: dict) -> d
                 "message": "Spec failed completeness checks",
                 "missing": layer1_result.missing_required,
                 "completeness_pct": layer1_result.completeness_percent,
-            })
+                                                    }, tenant_id)
             await update_job_status(conn, job_id, "failed", error=error_msg)
             return {"status": "failed", "error": error_msg, "missing": layer1_result.missing_required}
 
         await write_event(conn, job_id, "validation", "passed", {
             "message": "Spec passed all completeness checks",
             "completeness_pct": layer1_result.completeness_percent,
-        })
+                                    }, tenant_id)
 
         # ── Step 4: Run Completeness Validator Layer 2 (Qwen3-8B gap analysis)
         await write_event(conn, job_id, "gap_analysis", "started", {
             "message": "Running gap analysis with Qwen3-8B",
-        })
+                                    }, tenant_id)
 
         try:
             full_result = await validator.validate(spec_data, run_gap_analysis=True)
@@ -220,18 +223,18 @@ async def run_generation(ctx, job_id: str, tenant_id: str, spec_data: dict) -> d
             await write_event(conn, job_id, "gap_analysis", "complete", {
                 "message": f"Found {len(gap_questions)} gap questions",
                 "gap_questions": gap_questions,
-            })
+                                                    }, tenant_id)
         except Exception as e:
             logger.warning("[Worker] Gap analysis failed: %s — continuing", e)
             await write_event(conn, job_id, "gap_analysis", "skipped", {
                 "message": f"Gap analysis skipped: {e}",
-            })
+                                                    }, tenant_id)
             gap_questions = []
 
         # ── Step 5: Build spec object for the generation graph ────────────────
         await write_event(conn, job_id, "planning", "started", {
             "message": "Building spec for generation pipeline",
-        })
+                                    }, tenant_id)
 
         # Extract entity names for the planner
         entity_names = [
@@ -244,7 +247,7 @@ async def run_generation(ctx, job_id: str, tenant_id: str, spec_data: dict) -> d
             "message": "Starting LangGraph generation pipeline",
             "entities": entity_names,
             "module_count_estimate": len(entity_names) * 3 + 1,
-        })
+                                    }, tenant_id)
 
         try:
             final_state = await run_generation_job(
@@ -267,13 +270,13 @@ async def run_generation(ctx, job_id: str, tenant_id: str, spec_data: dict) -> d
                 "message": "Generation pipeline complete",
                 "fix_iterations": getattr(final_state, "fix_count", 0),
                 "file_count": len(getattr(final_state, "assembled_files", {})),
-            })
+                                                    }, tenant_id)
 
         except Exception as e:
             logger.error("[Worker] Generation pipeline failed: %s", e)
             await write_event(conn, job_id, "generation", "failed", {
                 "message": f"Generation failed: {str(e)[:200]}",
-            })
+                                                    }, tenant_id)
             await update_job_status(conn, job_id, "failed", error=str(e)[:500])
             return {"status": "failed", "error": str(e)}
 
@@ -287,7 +290,7 @@ async def run_generation(ctx, job_id: str, tenant_id: str, spec_data: dict) -> d
         await write_event(conn, job_id, "delivery", "complete", {
             "message": "Job completed successfully",
             "result": result,
-        })
+                                    }, tenant_id)
 
         logger.info("[Worker] Job %s completed successfully", job_id)
         return {"status": "completed", "result": result}

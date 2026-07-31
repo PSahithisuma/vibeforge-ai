@@ -345,8 +345,8 @@ services:
     restart: unless-stopped
     env_file: .env
     volumes:
-      # Hot-reload: mount source so changes are picked up on container restart
       - ./services/worker:/app
+      - .:/project
     depends_on:
       postgres:
         condition: service_healthy
@@ -354,7 +354,8 @@ services:
         condition: service_healthy
     networks:
       - vibeforge
-
+    environment:
+      AGENTS_ROOT: /project
   # ===========================================================================
   # OLLAMA — Local LLM inference (qwen3:8b)
   # First run: pulls qwen3:8b model (~5GB). Subsequent starts are instant.

@@ -228,10 +228,11 @@ async def enqueue_generation(
 
     # ── 4. Enqueue Arq job (_job_id = idempotency_key prevents double-dispatch)
     await request.app.state.arq_pool.enqueue_job(
-        "run_dummy_job",
+        "run_generation",
         _job_id=idempotency_key,
         job_id=str(job_id),
         tenant_id=str(user.tenant_id),
+        spec_data=spec_dict,
     )
 
     JOBS_ENQUEUED.labels(job_type="generation").inc()

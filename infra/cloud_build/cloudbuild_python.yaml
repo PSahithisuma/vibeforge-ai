@@ -1,0 +1,168 @@
+# =============================================================================
+# Cloud Build QA Gate — Python FastAPI + React (Phase 3 — Contract C12)
+#
+# Second stack profile. Proves polyglot abstraction:
+# Zero change to orchestration code — only a new cloudbuild_python.yaml
+#
+# Gate sequence:
+#   1. compile (lint)   → ruff check + mypy
+#   2. test             → pytest + coverage ≥60%
+#   3. migration        → alembic upgrade head (SQLite in-memory)
+#   4. smoke            → uvicorn start + curl /health
+#   5. frontend build   → npm ci + npm run build
+#   6. semgrep          → SAST p/python + p/owasp-top-ten
+#   7. trivy            → SCA + CycloneDX SBOM
+#   8. gitleaks         → secrets scan
+# =============================================================================
+
+steps:
+
+  # ── Step 0: Fetch artifact ──────────────────────────────────────────────────
+  - name: 'gcr.io/cloud-builders/gsutil'
+    id: fetch-artifact
+    args: ['cp', '${_ARTIFACT_GCS_URI}', '/workspace/app.zip']
+
+  - name: 'alpine'
+    id: unzip
+    args: ['sh', '-c', 'apk add --no-cache unzip && unzip /workspace/app.zip -d /workspace/app']
+    waitFor: ['fetch-artifact']
+
+  # ── Step 1: Lint (ruff + mypy) ──────────────────────────────────────────────
+  - name: '${_REGION}-docker.pkg.dev/${PROJECT_ID}/vibeforge-docker/toolchain-python:3.12'
+    id: lint
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        pip install --quiet -i https://${_REGION}-python.pkg.dev/${PROJECT_ID}/vibeforge-python/simple/ \
+          ruff mypy -r requirements.txt 2>&1
+        ruff check . 2>&1 | tee /workspace/ruff.log
+        mypy . --ignore-missing-imports 2>&1 | tee /workspace/mypy.log || true
+    dir: '/workspace/app/backend'
+    waitFor: ['unzip']
+
+  # ── Step 2: pytest + coverage ───────────────────────────────────────────────
+  - name: '${_REGION}-docker.pkg.dev/${PROJECT_ID}/vibeforge-docker/toolchain-python:3.12'
+    id: test
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        pip install --quiet -i https://${_REGION}-python.pkg.dev/${PROJECT_ID}/vibeforge-python/simple/ \
+          pytest pytest-cov -r requirements.txt -r requirements-test.txt 2>&1
+        pytest --cov=. --cov-report=json:/workspace/coverage.json \
+               --cov-fail-under=60 -v 2>&1 | tee /workspace/test.log
+        # Extract coverage pct
+        python3 -c "import json; d=json.load(open('/workspace/coverage.json')); print(d['totals']['percent_covered_display'])" \
+          > /workspace/coverage.txt
+    dir: '/workspace/app/backend'
+    waitFor: ['lint']
+
+  # ── Step 3: DB migration dry-run (Alembic + SQLite) ─────────────────────────
+  - name: '${_REGION}-docker.pkg.dev/${PROJECT_ID}/vibeforge-docker/toolchain-python:3.12'
+    id: migration
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        DATABASE_URL="sqlite:///./test.db" alembic upgrade head 2>&1 | tee /workspace/migration.log
+    dir: '/workspace/app/backend'
+    waitFor: ['unzip']
+
+  # ── Step 4: API smoke ────────────────────────────────────────────────────────
+  - name: '${_REGION}-docker.pkg.dev/${PROJECT_ID}/vibeforge-docker/toolchain-python:3.12'
+    id: smoke
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        DATABASE_URL="sqlite:///./test.db" uvicorn main:app --port 8000 &
+        PID=$!
+        for i in $(seq 1 12); do
+          sleep 5
+          curl -sf http://localhost:8000/health && break
+          echo "Waiting... $i/12"
+        done
+        curl -sf http://localhost:8000/health | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('status')=='ok'"
+        kill $PID 2>/dev/null
+    dir: '/workspace/app/backend'
+    waitFor: ['test', 'migration']
+
+  # ── Step 5: Frontend build (React) ───────────────────────────────────────────
+  - name: '${_REGION}-docker.pkg.dev/${PROJECT_ID}/vibeforge-docker/toolchain-python:3.12'
+    id: frontend-build
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        npm ci --registry=https://${_REGION}-npm.pkg.dev/${PROJECT_ID}/vibeforge-npm/ 2>&1
+        npm run build 2>&1 | tee /workspace/frontend-build.log
+    dir: '/workspace/app/frontend'
+    waitFor: ['unzip']
+
+  # ── Step 6: Semgrep SAST ─────────────────────────────────────────────────────
+  - name: 'returntocorp/semgrep'
+    id: semgrep
+    args:
+      - '--config=p/python'
+      - '--config=p/owasp-top-ten'
+      - '--json'
+      - '--output=/workspace/semgrep.json'
+      - '.'
+    dir: '/workspace/app'
+    waitFor: ['unzip']
+
+  # ── Step 7: Trivy + SBOM ─────────────────────────────────────────────────────
+  - name: 'aquasec/trivy:latest'
+    id: trivy-sbom
+    args: ['fs', '.', '--format=cyclonedx', '--output=/workspace/sbom.json']
+    dir: '/workspace/app'
+    waitFor: ['unzip']
+
+  - name: 'aquasec/trivy:latest'
+    id: trivy-vuln
+    args: ['fs', '.', '--format=json', '--output=/workspace/trivy.json', '--severity=CRITICAL,HIGH']
+    dir: '/workspace/app'
+    waitFor: ['unzip']
+
+  # ── Step 8: gitleaks ─────────────────────────────────────────────────────────
+  - name: 'zricethezav/gitleaks:latest'
+    id: gitleaks
+    args: ['detect', '--source=/workspace/app', '--report-path=/workspace/gitleaks.json', '--exit-code=0']
+    waitFor: ['unzip']
+
+  # ── Step 9: GateReport ───────────────────────────────────────────────────────
+  - name: 'python:3.12-slim'
+    id: gate-report
+    entrypoint: 'python3'
+    args: ['/workspace/assemble_gate_report.py']
+    env:
+      - 'JOB_ID=${_JOB_ID}'
+      - 'TENANT_ID=${_TENANT_ID}'
+      - 'STACK=${_STACK}'
+      - 'ARTIFACTS_BUCKET=${_ARTIFACTS_BUCKET}'
+    waitFor: ['smoke', 'frontend-build', 'semgrep', 'trivy-vuln', 'gitleaks']
+
+artifacts:
+  objects:
+    location: 'gs://${_ARTIFACTS_BUCKET}/gate-runs/${_JOB_ID}/'
+    paths:
+      - '/workspace/sbom.json'
+      - '/workspace/semgrep.json'
+      - '/workspace/trivy.json'
+      - '/workspace/gitleaks.json'
+      - '/workspace/test.log'
+      - '/workspace/coverage.json'
+      - '/workspace/gate_report.json'
+
+options:
+  machineType: 'E2_HIGHCPU_8'
+  logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _JOB_ID: 'unknown'
+  _TENANT_ID: 'unknown'
+  _STACK: 'python_fastapi'
+  _REGION: 'us-central1'
+  _ARTIFACTS_BUCKET: 'vf-artifacts-dev'
+  _ARTIFACT_GCS_URI: 'gs://vf-artifacts-dev/jobs/unknown/app.zip'

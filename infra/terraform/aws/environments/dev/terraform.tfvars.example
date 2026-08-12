@@ -3,7 +3,7 @@
 # DO NOT commit this file to Git (it is in .gitignore)
 # =============================================================================
 
-aws_region  = "ap-south-1"   # Mumbai — closest to India
+aws_region  = "us-east-1"   # Virginia — Claude 3 Haiku available here directly
 
 db_password = "VibeForge_Dev_Secret_2026!"   # change this
 

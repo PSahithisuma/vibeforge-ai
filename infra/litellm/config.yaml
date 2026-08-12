@@ -1,21 +1,22 @@
 # =============================================================================
-# LiteLLM Proxy Configuration — VibeForge (AWS / Bedrock Edition)
+# LiteLLM Proxy Configuration — VibeForge (AWS / Bedrock)
 #
 # Contract C11: Every LLM call is routed through this proxy.
+#   - Region: us-east-1 (Virginia) — Claude 3 Haiku available directly
 #   - All agent code targets model alias "agent-model"
-#   - On AWS: Claude 3 Haiku via Cross-Region Inference Profile
-#     Infrastructure stays in ap-south-1 (Mumbai).
-#     AWS internally routes the model call to us-east-1.
-#     Result: Haiku quality + Mumbai infrastructure.
-#   - Escalation fallback: Claude 3 Haiku (same, second slot)
-#   - Embeddings: Titan Text Embeddings V2 (ap-south-1 native)
-#   - Every call logged to CloudWatch
+#   - Primary: Claude 3 Haiku (fast, smart, perfect for code gen)
+#   - Embeddings: Titan Text Embeddings V2
 #   - Budget cap enforced per virtual key
 #
 # Model pricing:
-#   Claude 3 Haiku  : $0.00025 / 1K input tokens  ← primary
-#   Titan Embed V2  : $0.00002 / 1K tokens         ← embeddings
-# Cross-region inference adds ~200ms latency (acceptable for code gen)
+#   Claude 3 Haiku  : $0.00025 / 1K input tokens
+#   Titan Embed V2  : $0.00002 / 1K tokens
+#   $5 budget cap → ~20M tokens/month per tenant
+#
+# Endpoints:
+#   Chat:    POST http://litellm:4000/v1/chat/completions
+#   Models:  GET  http://litellm:4000/v1/models
+#   Health:  GET  http://litellm:4000/health
 #
 # Endpoints:
 #   Chat:    POST http://litellm:4000/v1/chat/completions
@@ -26,52 +27,49 @@
 model_list:
 
   # ---------------------------------------------------------------------------
-  # Primary agent model — Claude 3 Haiku via Cross-Region Inference
-  # "us." prefix = cross-region inference profile.
-  # Your ECS task is in ap-south-1. AWS routes this call to us-east-1
-  # behind the scenes. You get full Haiku quality, infra stays in Mumbai.
+  # Primary agent model — Claude 3 Haiku (us-east-1, direct)
+  # The model that was in the original plan. Available directly in us-east-1.
+  # Fast, smart, excellent at code generation and instruction following.
   # ---------------------------------------------------------------------------
   - model_name: agent-model
     litellm_params:
-      model: bedrock/us.anthropic.claude-3-haiku-20240307-v1:0
-      aws_region_name: ap-south-1
+      model: bedrock/anthropic.claude-3-haiku-20240307-v1:0
+      aws_region_name: us-east-1
       stream: true
       timeout: 120
       max_retries: 2
 
   # ---------------------------------------------------------------------------
-  # Fast model — Claude 3 Haiku (same model, lower timeout)
-  # Used for: routing decisions, gate summaries, simple classification
+  # Fast model — Claude 3 Haiku, lower timeout for quick classification calls
   # ---------------------------------------------------------------------------
   - model_name: fast-model
     litellm_params:
-      model: bedrock/us.anthropic.claude-3-haiku-20240307-v1:0
-      aws_region_name: ap-south-1
+      model: bedrock/anthropic.claude-3-haiku-20240307-v1:0
+      aws_region_name: us-east-1
       stream: false
       timeout: 30
       max_retries: 1
 
   # ---------------------------------------------------------------------------
-  # Smart model — Claude 3 Haiku (same, used as named escalation slot)
-  # If you upgrade later, swap this to Claude 3.5 Sonnet cross-region.
+  # Smart model — Claude 3 Haiku with higher retry tolerance
+  # Swap to claude-3-5-sonnet later if you need even higher quality
   # ---------------------------------------------------------------------------
   - model_name: smart-model
     litellm_params:
-      model: bedrock/us.anthropic.claude-3-haiku-20240307-v1:0
-      aws_region_name: ap-south-1
+      model: bedrock/anthropic.claude-3-haiku-20240307-v1:0
+      aws_region_name: us-east-1
       stream: true
       timeout: 180
       max_retries: 3
 
   # ---------------------------------------------------------------------------
-  # Embedding model — Amazon Titan Text Embeddings V2
-  # Available natively in ap-south-1. No cross-region needed.
-  # 1536-dimension embeddings — replaces bge-m3 from local Ollama.
+  # Embedding model — Amazon Titan Text Embeddings V2 (us-east-1)
+  # Replaces bge-m3 from local Ollama. 1536-dimension vectors.
   # ---------------------------------------------------------------------------
   - model_name: embed-model
     litellm_params:
       model: bedrock/amazon.titan-embed-text-v2:0
-      aws_region_name: ap-south-1
+      aws_region_name: us-east-1
       timeout: 60
 
 

@@ -1,7 +1,7 @@
 variable "aws_region" {
-  description = "AWS region — ap-south-1 is Mumbai (closest to India)"
+  description = "AWS region — us-east-1 (Virginia): all Bedrock models including Claude 3 Haiku"
   type        = string
-  default     = "ap-south-1"
+  default     = "us-east-1"
 }
 
 variable "env" {

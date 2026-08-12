@@ -97,6 +97,7 @@ module "ecs" {
   qdrant_url     = var.qdrant_url
   qdrant_api_key = var.qdrant_api_key
   litellm_key    = var.litellm_master_key
+  anthropic_api_key = var.anthropic_api_key
   bedrock_region = var.aws_region
 }
 

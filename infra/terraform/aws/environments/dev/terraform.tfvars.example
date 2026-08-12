@@ -11,4 +11,7 @@ db_password = "VibeForge_Dev_Secret_2026!"   # change this
 qdrant_url     = "https://YOUR-CLUSTER.us-east-0.aws.cloud.qdrant.io:6333"
 qdrant_api_key = "YOUR-QDRANT-API-KEY"
 
-litellm_master_key = "sk-vibeforge-litellm-dev-change-me"
+litellm_master_key = "sk-vibeforge-litellm-dev-2026"   # make up any string
+
+# Get from console.anthropic.com → API Keys → Create key
+anthropic_api_key  = "sk-ant-YOUR-KEY-HERE"

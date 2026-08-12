@@ -19,6 +19,7 @@ variable "s3_art_bucket"  { type = string }
 variable "qdrant_url"     { type = string }
 variable "qdrant_api_key" { type = string; sensitive = true }
 variable "litellm_key"    { type = string; sensitive = true }
+variable "anthropic_api_key" { type = string; sensitive = true; default = "" }
 variable "bedrock_region" { type = string }
 
 locals {
@@ -206,9 +207,10 @@ locals {
       desired  = 1
       tg_key   = "litellm"
       env_vars = {
-        LITELLM_MASTER_KEY = var.litellm_key
-        DATABASE_URL       = "postgresql://vibeforge:${var.db_password}@${var.db_host}/litellm"
-        AWS_REGION_NAME    = var.bedrock_region
+        LITELLM_MASTER_KEY  = var.litellm_key
+        DATABASE_URL        = "postgresql://vibeforge:${var.db_password}@${var.db_host}/litellm"
+        AWS_REGION_NAME     = var.bedrock_region
+        ANTHROPIC_API_KEY   = var.anthropic_api_key
       }
     }
     sandbox = {

@@ -33,3 +33,10 @@ variable "litellm_master_key" {
   sensitive   = true
   default     = "sk-vibeforge-litellm-dev-change-me"
 }
+
+variable "anthropic_api_key" {
+  description = "Anthropic API key from console.anthropic.com (sk-ant-...)"
+  type        = string
+  sensitive   = true
+  default     = ""
+}

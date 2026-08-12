@@ -1,69 +1,70 @@
 # =============================================================================
-# LiteLLM Proxy Configuration — VibeForge (Anthropic Direct API)
+# LiteLLM Proxy Configuration — VibeForge (AWS Bedrock / Nova Pro)
 #
 # Contract C11: Every LLM call is routed through this proxy.
-#   - Provider: Anthropic API (api.anthropic.com) — direct, no AWS Bedrock
-#   - Primary: Claude 3 Haiku — exactly as planned
-#   - Embeddings: Amazon Titan via Bedrock (us-east-1) — no restrictions
+#   - Provider: Amazon Bedrock (us-east-1) — uses $300 AWS free credits
+#   - Primary: Amazon Nova Pro — best available model, no access form needed
+#   - Embeddings: Amazon Titan Text Embeddings V2
 #   - Budget cap enforced per virtual key
 #
-# Why direct API instead of Bedrock:
-#   New AWS accounts require a support case to access Anthropic models.
-#   Direct API works instantly with just an API key.
-#   Same model, same price ($0.00025/1K input tokens).
+# TO SWITCH TO CLAUDE 3 HAIKU (once AWS support grants access):
+#   Change every model value from:
+#     bedrock/amazon.nova-pro-v1:0
+#   To:
+#     bedrock/anthropic.claude-3-haiku-20240307-v1:0
+#   That is the only change needed.
 #
-# Model pricing:
-#   Claude 3 Haiku  : $0.00025 / 1K input tokens
-#   Titan Embed V2  : $0.00002 / 1K tokens
-#   $5 budget cap → ~20M tokens/month per tenant
+# Model pricing (from AWS $300 credits):
+#   Nova Pro    : $0.0008 / 1K input tokens
+#   Titan Embed : $0.00002 / 1K tokens
+#   $5 budget cap = ~6M Nova Pro tokens/month per tenant
 #
 # Endpoints:
 #   Chat:    POST http://litellm:4000/v1/chat/completions
-#   Models:  GET  http://litellm:4000/v1/models
 #   Health:  GET  http://litellm:4000/health
 # =============================================================================
 
 model_list:
 
   # ---------------------------------------------------------------------------
-  # Primary agent model — Claude 3 Haiku (Anthropic Direct API)
-  # api.anthropic.com — no AWS restrictions, works immediately.
-  # ANTHROPIC_API_KEY injected as environment variable by ECS task.
+  # Primary agent model — Amazon Nova Pro (Bedrock, us-east-1)
+  # No use case form needed. Works immediately. Uses AWS $300 credits.
+  # TO SWITCH TO HAIKU: change model to:
+  #   bedrock/anthropic.claude-3-haiku-20240307-v1:0
   # ---------------------------------------------------------------------------
   - model_name: agent-model
     litellm_params:
-      model: claude-3-haiku-20240307
-      api_key: ${ANTHROPIC_API_KEY}
+      model: bedrock/amazon.nova-pro-v1:0
+      aws_region_name: us-east-1
       stream: true
       timeout: 120
       max_retries: 2
 
   # ---------------------------------------------------------------------------
-  # Fast model — Claude 3 Haiku, lower timeout for quick calls
+  # Fast model — Nova Micro (lightweight, for routing/classification calls)
   # ---------------------------------------------------------------------------
   - model_name: fast-model
     litellm_params:
-      model: claude-3-haiku-20240307
-      api_key: ${ANTHROPIC_API_KEY}
+      model: bedrock/amazon.nova-micro-v1:0
+      aws_region_name: us-east-1
       stream: false
       timeout: 30
       max_retries: 1
 
   # ---------------------------------------------------------------------------
-  # Smart model — Claude 3 Haiku with higher retry tolerance
-  # Upgrade to claude-3-5-sonnet-20241022 later for even better quality
+  # Smart model — Nova Pro with higher retry tolerance (escalation slot)
   # ---------------------------------------------------------------------------
   - model_name: smart-model
     litellm_params:
-      model: claude-3-haiku-20240307
-      api_key: ${ANTHROPIC_API_KEY}
+      model: bedrock/amazon.nova-pro-v1:0
+      aws_region_name: us-east-1
       stream: true
       timeout: 180
       max_retries: 3
 
   # ---------------------------------------------------------------------------
-  # Embedding model — Amazon Titan Text Embeddings V2 via Bedrock (us-east-1)
-  # Titan embeddings have NO use case form requirement — works immediately.
+  # Embedding model — Amazon Titan Text Embeddings V2 (us-east-1)
+  # No restrictions. Replaces bge-m3 from local Ollama.
   # ---------------------------------------------------------------------------
   - model_name: embed-model
     litellm_params:

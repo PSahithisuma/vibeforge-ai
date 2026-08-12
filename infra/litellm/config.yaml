@@ -3,16 +3,19 @@
 #
 # Contract C11: Every LLM call is routed through this proxy.
 #   - All agent code targets model alias "agent-model"
-#   - On AWS: routes to Amazon Nova Micro (ap-south-1, cheapest)
-#   - Escalation fallback: Nova Lite (smarter, still cheap)
-#   - Embeddings: Titan Text Embeddings V2 (native Bedrock)
-#   - Every call logged to CloudWatch (Langfuse optional)
+#   - On AWS: Claude 3 Haiku via Cross-Region Inference Profile
+#     Infrastructure stays in ap-south-1 (Mumbai).
+#     AWS internally routes the model call to us-east-1.
+#     Result: Haiku quality + Mumbai infrastructure.
+#   - Escalation fallback: Claude 3 Haiku (same, second slot)
+#   - Embeddings: Titan Text Embeddings V2 (ap-south-1 native)
+#   - Every call logged to CloudWatch
 #   - Budget cap enforced per virtual key
 #
-# Model pricing (ap-south-1):
-#   Nova Micro  : $0.000035 / 1K input tokens  ← primary
-#   Nova Lite   : $0.00006  / 1K input tokens  ← escalation
-#   Titan Embed : $0.00002  / 1K tokens        ← embeddings
+# Model pricing:
+#   Claude 3 Haiku  : $0.00025 / 1K input tokens  ← primary
+#   Titan Embed V2  : $0.00002 / 1K tokens         ← embeddings
+# Cross-region inference adds ~200ms latency (acceptable for code gen)
 #
 # Endpoints:
 #   Chat:    POST http://litellm:4000/v1/chat/completions
@@ -23,45 +26,47 @@
 model_list:
 
   # ---------------------------------------------------------------------------
-  # Primary agent model — Amazon Nova Micro (ap-south-1 Bedrock)
-  # Fastest + cheapest. Used for all agent orchestration calls.
+  # Primary agent model — Claude 3 Haiku via Cross-Region Inference
+  # "us." prefix = cross-region inference profile.
+  # Your ECS task is in ap-south-1. AWS routes this call to us-east-1
+  # behind the scenes. You get full Haiku quality, infra stays in Mumbai.
   # ---------------------------------------------------------------------------
   - model_name: agent-model
     litellm_params:
-      model: bedrock/amazon.nova-micro-v1:0
+      model: bedrock/us.anthropic.claude-3-haiku-20240307-v1:0
       aws_region_name: ap-south-1
       stream: true
       timeout: 120
       max_retries: 2
 
   # ---------------------------------------------------------------------------
-  # Fast model — same Nova Micro, lower timeout for quick calls
+  # Fast model — Claude 3 Haiku (same model, lower timeout)
   # Used for: routing decisions, gate summaries, simple classification
   # ---------------------------------------------------------------------------
   - model_name: fast-model
     litellm_params:
-      model: bedrock/amazon.nova-micro-v1:0
+      model: bedrock/us.anthropic.claude-3-haiku-20240307-v1:0
       aws_region_name: ap-south-1
       stream: false
       timeout: 30
       max_retries: 1
 
   # ---------------------------------------------------------------------------
-  # Smart model — Amazon Nova Lite (escalation fallback — Contract C11)
-  # Automatically used when Nova Micro fails or needs deeper reasoning
+  # Smart model — Claude 3 Haiku (same, used as named escalation slot)
+  # If you upgrade later, swap this to Claude 3.5 Sonnet cross-region.
   # ---------------------------------------------------------------------------
   - model_name: smart-model
     litellm_params:
-      model: bedrock/amazon.nova-lite-v1:0
+      model: bedrock/us.anthropic.claude-3-haiku-20240307-v1:0
       aws_region_name: ap-south-1
       stream: true
-      timeout: 120
-      max_retries: 2
+      timeout: 180
+      max_retries: 3
 
   # ---------------------------------------------------------------------------
   # Embedding model — Amazon Titan Text Embeddings V2
-  # Used by the RAG ingestion + retrieval pipeline (bge-m3 replacement on AWS)
-  # 1536-dimension embeddings, available in ap-south-1
+  # Available natively in ap-south-1. No cross-region needed.
+  # 1536-dimension embeddings — replaces bge-m3 from local Ollama.
   # ---------------------------------------------------------------------------
   - model_name: embed-model
     litellm_params:
@@ -112,7 +117,8 @@ general_settings:
   database_url: ${DATABASE_URL}
 
   # Real budget cap — Bedrock has actual cost per token
-  # $5 per tenant per month hard cap (Contract C11)
+  # Claude 3 Haiku: ~$0.25 per 1M input tokens → $5 = ~20M tokens/month
+  # That is enough for thousands of spec-to-code generation runs.
   max_budget: 5.0
   budget_duration: "30d"
 

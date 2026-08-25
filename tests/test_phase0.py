@@ -152,7 +152,7 @@ class TestGenerationGraph:
             })
         })
 
-        final_state = asyncio.get_event_loop().run_until_complete(
+        final_state = asyncio.run(
             run_generation_job(
                 job_id=str(uuid4()),
                 tenant_id=str(uuid4()),
@@ -195,7 +195,7 @@ class TestGenerationGraph:
         # Empty spec → no entities → no assembled files → gate will fail in stub
         spec = make_empty_spec(tenant_id=uuid4(), project_id=uuid4())
 
-        final_state = asyncio.get_event_loop().run_until_complete(
+        final_state = asyncio.run(
             run_generation_job(
                 job_id=str(uuid4()),
                 tenant_id=str(uuid4()),
@@ -219,7 +219,7 @@ class TestGenerationGraph:
             })
         })
 
-        final_state = asyncio.get_event_loop().run_until_complete(
+        final_state = asyncio.run(
             run_generation_job(job_id=str(uuid4()), tenant_id=str(uuid4()), spec=spec)
         )
 
@@ -240,7 +240,7 @@ class TestGenerationGraph:
             })
         })
 
-        final_state = asyncio.get_event_loop().run_until_complete(
+        final_state = asyncio.run(
             run_generation_job(job_id=str(uuid4()), tenant_id=str(uuid4()), spec=spec)
         )
 
@@ -467,7 +467,7 @@ class TestStructuredOutputHarness:
             confidence: float
 
         harness = StructuredOutputHarness(perfect_mock)
-        result, meta = asyncio.get_event_loop().run_until_complete(
+        result, meta = asyncio.run(
             harness.call(
                 output_schema=GreetingModel,
                 user_message="Generate a greeting for Alice",
@@ -488,7 +488,7 @@ class TestStructuredOutputHarness:
             confidence: float
 
         harness = StructuredOutputHarness(fenced_mock)
-        result, meta = asyncio.get_event_loop().run_until_complete(
+        result, meta = asyncio.run(
             harness.call(GreetingModel, "greeting please", context_tag="fence_test")
         )
         assert result.name == "Bob"
@@ -502,7 +502,7 @@ class TestStructuredOutputHarness:
             confidence: float
 
         harness = StructuredOutputHarness(fail_then_succeed_mock)
-        result, meta = asyncio.get_event_loop().run_until_complete(
+        result, meta = asyncio.run(
             harness.call(GreetingModel, "test", context_tag="repair_test")
         )
         assert result.name == "Charlie"
@@ -519,7 +519,7 @@ class TestStructuredOutputHarness:
 
         harness = StructuredOutputHarness(always_fail_mock)
         with pytest.raises(HarnessError):
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 harness.call(GreetingModel, "test", max_attempts=3, context_tag="fail_test")
             )
 

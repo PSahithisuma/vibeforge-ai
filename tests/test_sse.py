@@ -28,7 +28,7 @@ def _normalise_payload(raw):
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 def _evt(phase="planning", node="plan_node", **payload) -> JobEvent:
@@ -218,8 +218,7 @@ class TestGenerateSpec:
                                     job_id="j", tenant_id="t", spec_id="s")
         with pytest.raises(RuntimeError):
             _run(run())
-        failed = [x for x in c.execute.call_args_list
-                  if "'failed'" in x[0][0]]
+        failed = [x for x in c.execute.call_args_list if len(x[0]) > 0 and 'failed' in str(x[0][0])]
         assert len(failed) == 1
 
     def test_works_without_redis(self):

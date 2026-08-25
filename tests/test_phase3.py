@@ -177,31 +177,31 @@ class TestEscalationGate:
     def test_blocked_when_already_escalated(self):
         gate = EscalationGate()
         ctx = make_ctx(escalation_used=True)
-        result = asyncio.get_event_loop().run_until_complete(gate.evaluate(ctx))
+        result = asyncio.run(gate.evaluate(ctx))
         assert result.verdict == EscalationVerdict.BLOCKED_LIMIT
 
     def test_blocked_before_3_iterations(self):
         gate = EscalationGate()
         ctx = make_ctx(fix_iteration=1)
-        result = asyncio.get_event_loop().run_until_complete(gate.evaluate(ctx))
+        result = asyncio.run(gate.evaluate(ctx))
         assert result.verdict == EscalationVerdict.BLOCKED_ITER
 
     def test_blocked_without_tenant_consent(self):
         gate = EscalationGate()
         ctx = make_ctx(tenant_escalation_enabled=False)
-        result = asyncio.get_event_loop().run_until_complete(gate.evaluate(ctx))
+        result = asyncio.run(gate.evaluate(ctx))
         assert result.verdict == EscalationVerdict.BLOCKED_CONSENT
 
     def test_blocked_without_external_llm_consent(self):
         gate = EscalationGate()
         ctx = make_ctx(tenant_external_llm_consent=False)
-        result = asyncio.get_event_loop().run_until_complete(gate.evaluate(ctx))
+        result = asyncio.run(gate.evaluate(ctx))
         assert result.verdict == EscalationVerdict.BLOCKED_CONSENT
 
     def test_blocked_when_budget_insufficient(self):
         gate = EscalationGate()
         ctx = make_ctx(budget_remaining=2.0, escalation_cost_estimate=5.0)
-        result = asyncio.get_event_loop().run_until_complete(gate.evaluate(ctx))
+        result = asyncio.run(gate.evaluate(ctx))
         assert result.verdict == EscalationVerdict.BLOCKED_BUDGET
 
     def test_blocked_when_pii_in_prompt(self):
@@ -211,7 +211,7 @@ class TestEscalationGate:
                 "src/OrderService.java": "// customer email: john@realdomain.com"
             }
         )
-        result = asyncio.get_event_loop().run_until_complete(gate.evaluate(ctx))
+        result = asyncio.run(gate.evaluate(ctx))
         assert result.verdict == EscalationVerdict.BLOCKED_PII
         assert not result.pii_scan_passed
 
@@ -220,7 +220,7 @@ class TestEscalationGate:
         adapter = make_mock_commercial(fixed_response)
         gate = EscalationGate(commercial_adapter=adapter)
         ctx = make_ctx()
-        result = asyncio.get_event_loop().run_until_complete(gate.evaluate(ctx))
+        result = asyncio.run(gate.evaluate(ctx))
         assert result.verdict == EscalationVerdict.APPROVED
         assert result.approved
         assert result.pii_scan_passed
@@ -231,7 +231,7 @@ class TestEscalationGate:
         adapter = make_mock_commercial(fixed_response)
         gate = EscalationGate(commercial_adapter=adapter)
         ctx = make_ctx()
-        result = asyncio.get_event_loop().run_until_complete(gate.evaluate(ctx))
+        result = asyncio.run(gate.evaluate(ctx))
         assert result.cost_usd > 0
         assert result.tokens_used > 0
         assert result.model_used != ""
@@ -248,7 +248,7 @@ class TestEscalationGate:
             pii_scanner=TrackingScanner(),
         )
         ctx = make_ctx()
-        asyncio.get_event_loop().run_until_complete(gate.evaluate(ctx))
+        asyncio.run(gate.evaluate(ctx))
         assert scan_called["yes"], "Contract C18: PII scan must always run before commercial call"
 
     def test_contract_c6_output_not_auto_trusted(self):
@@ -260,7 +260,7 @@ class TestEscalationGate:
         adapter = make_mock_commercial({"src/X.java": "class X{}"})
         gate = EscalationGate(commercial_adapter=adapter)
         ctx = make_ctx()
-        result = asyncio.get_event_loop().run_until_complete(gate.evaluate(ctx))
+        result = asyncio.run(gate.evaluate(ctx))
         # The result contains fixed_files but NOT a gate_passed flag
         # The caller must run the sandbox gate on these files
         assert hasattr(result, "fixed_files")
@@ -291,7 +291,7 @@ class TestEscalationMemory:
 
     def test_store_and_lookup(self):
         sig = self._sig()
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             self.memory.store_success(
                 signature=sig,
                 fixed_files={"src/X.java": "class X { /* fixed */ }"},
@@ -300,7 +300,7 @@ class TestEscalationMemory:
                 model_used="claude-opus-4-6",
             )
         )
-        hits = asyncio.get_event_loop().run_until_complete(
+        hits = asyncio.run(
             self.memory.lookup(sig, self.tenant_id)
         )
         assert len(hits) >= 1
@@ -309,7 +309,7 @@ class TestEscalationMemory:
     def test_no_hit_for_different_tenant(self):
         sig = self._sig()
         other_tenant = str(uuid4())
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             self.memory.store_success(
                 signature=sig,
                 fixed_files={"src/X.java": "class X{}"},
@@ -319,7 +319,7 @@ class TestEscalationMemory:
             )
         )
         # Different tenant should not see it (not shared yet)
-        hits = asyncio.get_event_loop().run_until_complete(
+        hits = asyncio.run(
             self.memory.lookup(sig, self.tenant_id)
         )
         assert len(hits) == 0
@@ -327,7 +327,7 @@ class TestEscalationMemory:
     def test_auto_promote_at_3_reuses(self):
         """Contract C14: auto-promote to shared after 3 reuses."""
         sig = self._sig()
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             self.memory.store_success(
                 signature=sig,
                 fixed_files={"src/X.java": "class X{}"},
@@ -341,7 +341,7 @@ class TestEscalationMemory:
 
         # 3 reuses → auto-promote
         for _ in range(3):
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 self.memory.record_reuse(record_id)
             )
 
@@ -354,7 +354,7 @@ class TestEscalationMemory:
         """After promotion, other tenants can see it."""
         sig = self._sig()
         other_tenant = str(uuid4())
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             self.memory.store_success(
                 signature=sig,
                 fixed_files={"src/X.java": "class X{}"},
@@ -369,7 +369,7 @@ class TestEscalationMemory:
             self.store.increment_reuse(records[0].record_id)
 
         # Now visible to our tenant
-        hits = asyncio.get_event_loop().run_until_complete(
+        hits = asyncio.run(
             self.memory.lookup(sig, self.tenant_id)
         )
         assert len(hits) >= 1
@@ -398,7 +398,7 @@ class TestEscalationMemory:
 
     def test_lookup_returns_empty_when_no_match(self):
         sig = self._sig()
-        hits = asyncio.get_event_loop().run_until_complete(
+        hits = asyncio.run(
             self.memory.lookup(sig, self.tenant_id)
         )
         assert hits == []
@@ -425,14 +425,14 @@ class TestSemanticCache:
 
     def test_miss_on_empty_cache(self):
         key = self._key()
-        hit = asyncio.get_event_loop().run_until_complete(
+        hit = asyncio.run(
             self.cache.lookup(key, self.tenant_id)
         )
         assert hit is None
 
     def test_exact_hit_after_write(self):
         key = self._key()
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             self.cache.write(
                 key=key,
                 artifact_bundle_url="s3://bucket/bundle.zip",
@@ -444,7 +444,7 @@ class TestSemanticCache:
                 entity_count=5,
             )
         )
-        hit = asyncio.get_event_loop().run_until_complete(
+        hit = asyncio.run(
             self.cache.lookup(key, self.tenant_id)
         )
         assert hit is not None
@@ -454,7 +454,7 @@ class TestSemanticCache:
 
     def test_different_stack_is_cache_miss(self):
         key1 = self._key()
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             self.cache.write(
                 key=key1,
                 artifact_bundle_url="s3://bundle1.zip",
@@ -471,14 +471,14 @@ class TestSemanticCache:
             scaffold_version="1.0.0",
             ruleset_version="1.0.0",
         )
-        hit = asyncio.get_event_loop().run_until_complete(
+        hit = asyncio.run(
             self.cache.lookup(key2, self.tenant_id)
         )
         assert hit is None
 
     def test_different_scaffold_version_is_cache_miss(self):
         key1 = self._key()
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             self.cache.write(
                 key=key1,
                 artifact_bundle_url="s3://bundle1.zip",
@@ -494,7 +494,7 @@ class TestSemanticCache:
             scaffold_version="2.0.0",   # different scaffold version
             ruleset_version="1.0.0",
         )
-        hit = asyncio.get_event_loop().run_until_complete(
+        hit = asyncio.run(
             self.cache.lookup(key2, self.tenant_id)
         )
         assert hit is None
@@ -530,7 +530,7 @@ class TestSemanticCache:
 
     def test_invalidate_removes_entry(self):
         key = self._key()
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             self.cache.write(
                 key=key,
                 artifact_bundle_url="s3://bundle.zip",
@@ -540,18 +540,18 @@ class TestSemanticCache:
                 tenant_id=self.tenant_id,
             )
         )
-        removed = asyncio.get_event_loop().run_until_complete(
+        removed = asyncio.run(
             self.cache.invalidate(key)
         )
         assert removed is True
-        hit = asyncio.get_event_loop().run_until_complete(
+        hit = asyncio.run(
             self.cache.lookup(key, self.tenant_id)
         )
         assert hit is None
 
     def test_stats(self):
         key = self._key()
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             self.cache.write(
                 key=key,
                 artifact_bundle_url="s3://bundle.zip",
@@ -589,7 +589,7 @@ class TestPhase3Integration:
         )
 
         # Pre-store a successful fix
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             memory.store_success(
                 signature=sig,
                 fixed_files={"src/OrderService.java": "class OrderService { /* from memory */ }"},
@@ -600,7 +600,7 @@ class TestPhase3Integration:
         )
 
         # Lookup should return the cached fix
-        hits = asyncio.get_event_loop().run_until_complete(
+        hits = asyncio.run(
             memory.lookup(sig, tenant_id)
         )
         assert len(hits) >= 1
@@ -617,7 +617,7 @@ class TestPhase3Integration:
         )
 
         # Write to cache
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             cache.write(
                 key=key,
                 artifact_bundle_url="s3://cached_bundle.zip",
@@ -630,7 +630,7 @@ class TestPhase3Integration:
         )
 
         # Second job with same spec → should hit cache
-        hit = asyncio.get_event_loop().run_until_complete(
+        hit = asyncio.run(
             cache.lookup(key, tenant_id)
         )
         assert hit is not None
@@ -654,30 +654,30 @@ class TestPhase3Integration:
         key = SemanticCache.build_key("b" * 64, "java_spring")
 
         # Level 1: cache miss (no cached result yet)
-        hit = asyncio.get_event_loop().run_until_complete(cache.lookup(key, tenant_id))
+        hit = asyncio.run(cache.lookup(key, tenant_id))
         assert hit is None  # miss → proceed to generation
 
         # Level 2: memory miss (no similar failure seen before)
         sig = ProblemSignature(ErrorClass.COMPILE_ERROR, "java_spring")
-        mem_hits = asyncio.get_event_loop().run_until_complete(memory.lookup(sig, tenant_id))
+        mem_hits = asyncio.run(memory.lookup(sig, tenant_id))
         assert mem_hits == []  # miss → proceed to escalation
 
         # Level 3: escalation gate fires (all conditions met)
         ctx = make_ctx(tenant_id=tenant_id)
-        result = asyncio.get_event_loop().run_until_complete(gate.evaluate(ctx))
+        result = asyncio.run(gate.evaluate(ctx))
         assert result.approved  # commercial call succeeds
 
         # After success: store in memory for next time
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             memory.store_success(sig, result.fixed_files, tenant_id, ctx.job_id, result.model_used)
         )
 
         # After gate passes: write to cache
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             cache.write(key, "s3://new_bundle.zip", "https://git.test",
                        "New app", ctx.job_id, tenant_id)
         )
 
         # Next time: Level 1 hits immediately
-        hit2 = asyncio.get_event_loop().run_until_complete(cache.lookup(key, tenant_id))
+        hit2 = asyncio.run(cache.lookup(key, tenant_id))
         assert hit2 is not None and hit2.is_exact

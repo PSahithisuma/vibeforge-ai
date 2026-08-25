@@ -281,7 +281,7 @@ class TestDomainWizard:
             section_id="domain_model",
             spec_snapshot=minimal_spec_dict(),
         )
-        card = asyncio.get_event_loop().run_until_complete(wizard.process_turn(ctx))
+        card = asyncio.run(wizard.process_turn(ctx))
         assert card.amendment_id.startswith("amend_")
         assert card.proposal.new_entity_count == 1
         assert "Review" in str(card.proposal.patch)
@@ -303,7 +303,7 @@ class TestDomainWizard:
             section_id="vertical",
             spec_snapshot=spec,
         )
-        card = asyncio.get_event_loop().run_until_complete(wizard.process_turn(ctx))
+        card = asyncio.run(wizard.process_turn(ctx))
         # before_snapshot should contain the old value
         assert "vertical" in card.before_snapshot
 
@@ -327,7 +327,7 @@ class TestDomainWizard:
             spec_snapshot=minimal_spec_dict(),
             entities_in_context=["Product"],
         )
-        asyncio.get_event_loop().run_until_complete(wizard.process_turn(ctx))
+        asyncio.run(wizard.process_turn(ctx))
         assert not retrieved["called"], "Gate should have blocked retrieval for 'yes'"
 
     def test_wizard_triggers_retrieval_for_missing_connector(self):
@@ -351,7 +351,7 @@ class TestDomainWizard:
             integrations_named=["Razorpay"],
             connector_docs_available=[],  # no docs → gate fires NARROW
         )
-        card = asyncio.get_event_loop().run_until_complete(wizard.process_turn(ctx))
+        card = asyncio.run(wizard.process_turn(ctx))
         assert retrieved["query"] is not None, "Retrieval should have been called"
         assert card.retrieval_used is True
 
@@ -366,7 +366,7 @@ class TestDomainWizard:
             section_id="domain_model",
             spec_snapshot=minimal_spec_dict(),
         )
-        card = asyncio.get_event_loop().run_until_complete(wizard.process_turn(ctx))
+        card = asyncio.run(wizard.process_turn(ctx))
         assert card.proposal.confidence == 0.0
         assert card.proposal.patch == {}
 
@@ -391,7 +391,7 @@ class TestSpecEditorAgent:
             "confidence": 0.9,
         })
         agent = SpecEditorAgent(llm_client=llm)
-        card = asyncio.get_event_loop().run_until_complete(
+        card = asyncio.run(
             agent.process_amendment(
                 instruction="Add WhatsApp OTP as a secondary auth method",
                 section_id="security_model",
@@ -408,7 +408,7 @@ class TestSpecEditorAgent:
             "new_entity_count": 0, "new_endpoint_count": 0,
             "compliance_implications": [], "consistency_warnings": [], "confidence": 0.5})
         agent = SpecEditorAgent(llm_client=llm)
-        card = asyncio.get_event_loop().run_until_complete(
+        card = asyncio.run(
             agent.process_amendment(
                 instruction="  ",
                 section_id="domain_model",
@@ -447,7 +447,7 @@ class TestSpecEditorAgent:
             "soft_delete": False,
         })
         agent = SpecEditorAgent(llm_client=llm)
-        card = asyncio.get_event_loop().run_until_complete(
+        card = asyncio.run(
             agent.process_amendment(
                 instruction="Remove the Order entity",
                 section_id="domain_model",
@@ -472,7 +472,7 @@ class TestSpecEditorAgent:
         }
         llm = make_failing_llm(fail_times=1, then_return=good_response)
         agent = SpecEditorAgent(llm_client=llm)
-        card = asyncio.get_event_loop().run_until_complete(
+        card = asyncio.run(
             agent.process_amendment(
                 instruction="Add GDPR compliance",
                 section_id="compliance_model",
@@ -538,7 +538,7 @@ class TestCompletenessValidator:
         }
         llm = make_mock_llm(gap_response)
         validator = CompletenessValidator(llm_client=llm)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             validator.validate(populated_spec_dict(), run_gap_analysis=True)
         )
         assert result.is_complete
@@ -554,7 +554,7 @@ class TestCompletenessValidator:
             return json.dumps({"gap_questions": [], "analysis_summary": ""})
 
         validator = CompletenessValidator(llm_client=counting_llm)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             validator.validate(minimal_spec_dict(), run_gap_analysis=True)
         )
         assert not result.is_complete

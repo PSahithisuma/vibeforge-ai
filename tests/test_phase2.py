@@ -126,7 +126,7 @@ class TestPlannerAgent:
         llm = make_mock_llm(self._plan_response(["Product", "Order"]))
         planner = PlannerAgent(llm)
         spec = minimal_spec()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             planner.plan(spec, stack_profile="java_spring")
         )
         assert len(result.modules) >= 4
@@ -137,7 +137,7 @@ class TestPlannerAgent:
         response["synthesis_mode"] = "parallel"   # agent tried to set parallel
         llm = make_mock_llm(response)
         planner = PlannerAgent(llm)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             planner.plan(minimal_spec())
         )
         assert result.synthesis_mode == "sequential"   # enforced by planner
@@ -145,7 +145,7 @@ class TestPlannerAgent:
     def test_planner_dag_validation_passes_for_correct_plan(self):
         llm = make_mock_llm(self._plan_response(["Product"]))
         planner = PlannerAgent(llm)
-        result = asyncio.get_event_loop().run_until_complete(planner.plan(minimal_spec()))
+        result = asyncio.run(planner.plan(minimal_spec()))
         # Should not raise
         planner._validate_dag(result.modules)
 
@@ -164,7 +164,7 @@ class TestPlannerAgent:
             return "not json {{{"
         planner = PlannerAgent(always_fail)
         spec = minimal_spec()
-        result = asyncio.get_event_loop().run_until_complete(planner.plan(spec))
+        result = asyncio.run(planner.plan(spec))
         # Fallback should produce modules for Product and Order
         module_names = [m.name for m in result.modules]
         assert any("Product" in n for n in module_names)
@@ -174,7 +174,7 @@ class TestPlannerAgent:
     def test_planner_entity_modules_have_no_dependencies(self):
         llm = make_mock_llm(self._plan_response(["Product"]))
         planner = PlannerAgent(llm)
-        result = asyncio.get_event_loop().run_until_complete(planner.plan(minimal_spec()))
+        result = asyncio.run(planner.plan(minimal_spec()))
         entities = [m for m in result.modules if m.module_type == "entity"]
         for e in entities:
             assert e.dependencies == [], f"Entity {e.name} should have no dependencies"
@@ -182,7 +182,7 @@ class TestPlannerAgent:
     def test_planner_migration_is_last(self):
         llm = make_mock_llm(self._plan_response(["Product", "Order"]))
         planner = PlannerAgent(llm)
-        result = asyncio.get_event_loop().run_until_complete(planner.plan(minimal_spec()))
+        result = asyncio.run(planner.plan(minimal_spec()))
         migrations = [m for m in result.modules if m.module_type == "migration"]
         if migrations:
             max_order = max(m.build_order for m in result.modules)
@@ -230,7 +230,7 @@ class TestSynthesizerAgent:
     def test_synthesizer_returns_file_map(self):
         llm = make_mock_llm(self._synth_response("ProductEntity"))
         synth = SynthesizerAgent(llm, stack_profile="java_spring")
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             synth.synthesize_module(
                 module=self._make_module("ProductEntity"),
                 spec_dict=minimal_spec(),
@@ -242,7 +242,7 @@ class TestSynthesizerAgent:
     def test_synthesizer_files_have_content(self):
         llm = make_mock_llm(self._synth_response("OrderService", "java_spring"))
         synth = SynthesizerAgent(llm)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             synth.synthesize_module(
                 module=self._make_module("OrderService", "service"),
                 spec_dict=minimal_spec(),
@@ -264,7 +264,7 @@ class TestSynthesizerAgent:
                                "synthesis_notes": ""})
         synth = SynthesizerAgent(capturing_llm)
         gate_errors = {"OrderService.java": ["error: cannot find symbol 'OrderRepository'"]}
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             synth.synthesize_module(
                 module=self._make_module("OrderService", "service"),
                 spec_dict=minimal_spec(),
@@ -279,7 +279,7 @@ class TestSynthesizerAgent:
         async def always_fail(model, system, user, **kwargs):
             return "not json {{{"
         synth = SynthesizerAgent(always_fail)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             synth.synthesize_module(
                 module=self._make_module("ProductEntity"),
                 spec_dict=minimal_spec(),
@@ -296,7 +296,7 @@ class TestSynthesizerAgent:
         response["files"][0]["filename"] = "src\\main\\java\\ProductEntity.java"
         llm = make_mock_llm(response)
         synth = SynthesizerAgent(llm)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             synth.synthesize_module(
                 module=self._make_module("ProductEntity"),
                 spec_dict=minimal_spec(),
@@ -463,7 +463,7 @@ class TestReviewerAgent:
         gate = gate_fail(["src/ProductService.java"], "cannot find symbol 'ProductRepository'")
         assembly = self._assembly_with_file("src/ProductService.java", "class PS{}")
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             reviewer.review(gate, assembly, minimal_spec(), fix_iteration=1, max_iterations=3)
         )
         assert len(result.fix_instructions) == 1
@@ -480,7 +480,7 @@ class TestReviewerAgent:
             "reviewer_notes": "Complex failure",
         })
         reviewer = ReviewerAgent(llm)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             reviewer.review(
                 gate_fail(["x.java"]),
                 AssemblyResult(),
@@ -500,7 +500,7 @@ class TestReviewerAgent:
             assembled_files={"src/X.java": "class X{}"},
             file_ownership={"src/X.java": "x_module"},
         )
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             reviewer.review(gate, assembly, minimal_spec(), fix_iteration=1, max_iterations=3)
         )
         # Fallback should still produce fix instructions
@@ -541,7 +541,7 @@ class TestFixerAgent:
             "src/ProductService.java": "class ProductService{/* broken */}",
             "src/ProductEntity.java": "class ProductEntity{/* should not change */}",
         }
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             fixer.fix(rev_out, assembly, fix_iteration=1)
         )
         assert len(result) == 1   # only one file map for one instruction
@@ -567,7 +567,7 @@ class TestFixerAgent:
                 error_source="compile",
             )
         ])
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             fixer.fix(rev_out, AssemblyResult(), fix_iteration=2)
         )
         assert len(prompts) >= 1
@@ -583,7 +583,7 @@ class TestFixerAgent:
                 errors=["error"], fix_guidance="", error_source="compile",
             )
         ])
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             fixer.fix(rev_out, AssemblyResult(), fix_iteration=1)
         )
         # Should not raise — returns unchanged or stub
@@ -604,7 +604,7 @@ class TestMetacognitionGateTier1:
             "confidence": 0.9,
         })
         gate = MetacognitionGateTier1(llm)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             gate.arbitrate("retrieval", "Entity X mentioned but not in context")
         )
         assert result["verdict"] == "NEEDED"
@@ -619,7 +619,7 @@ class TestMetacognitionGateTier1:
             "confidence": 0.85,
         })
         gate = MetacognitionGateTier1(llm)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             gate.arbitrate("retrieval", "Razorpay named but no connector docs available")
         )
         assert result["verdict"] == "NARROW_QUERY"
@@ -628,7 +628,7 @@ class TestMetacognitionGateTier1:
     def test_tier1_defaults_not_needed_on_failure(self):
         async def fail(model, system, user, **kwargs): return "bad json {{{"
         gate = MetacognitionGateTier1(fail)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             gate.arbitrate("retrieval", "some context")
         )
         assert result["verdict"] == "NOT_NEEDED"
@@ -643,7 +643,7 @@ class TestMetacognitionGateTier1:
             "confidence": 0.95,
         })
         gate = MetacognitionGateTier1(llm)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             gate.arbitrate("retrieval", "editing known entity")
         )
         assert result["rationale"] == "All entities already in context"
@@ -693,7 +693,7 @@ class TestPhase2Integration:
 
         spec = minimal_spec()
         planner = PlannerAgent(multi_response_llm)
-        plan = asyncio.get_event_loop().run_until_complete(
+        plan = asyncio.run(
             planner.plan(spec, stack_profile="java_spring")
         )
         assert len(plan.modules) == 2
@@ -701,7 +701,7 @@ class TestPhase2Integration:
         synthesizer = SynthesizerAgent(multi_response_llm)
         file_maps = []
         for module in plan.modules:
-            fmo = asyncio.get_event_loop().run_until_complete(
+            fmo = asyncio.run(
                 synthesizer.synthesize_module(module=module, spec_dict=spec)
             )
             file_maps.append(fmo)
@@ -719,7 +719,7 @@ class TestPhase2Integration:
         from agents.graphs.generation_graph import run_generation_job
         import asyncio
 
-        final = asyncio.get_event_loop().run_until_complete(
+        final = asyncio.run(
             run_generation_job(
                 job_id=str(uuid4()),
                 tenant_id=str(uuid4()),

@@ -8,7 +8,7 @@ from agents.graphs.generation_graph import GenerationState, JobStatus, run_gener
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 def _pipeline(**kwargs):

@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from core.config import get_settings
 from core.metrics import setup_metrics
 from core.redis_client import close_redis
-from routers import health, jobs, projects, specs, stream
+from routers import health, jobs, projects, specs, stream, budget
 
 settings = get_settings()
 
@@ -87,6 +87,7 @@ app.include_router(projects.router)
 app.include_router(specs.router)
 app.include_router(jobs.router)
 app.include_router(stream.router)
+app.include_router(budget.router)
 
 # Prometheus /metrics — must be called AFTER routers are included
 setup_metrics(app)

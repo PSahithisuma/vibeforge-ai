@@ -1,77 +1,105 @@
 # =============================================================================
-# LiteLLM Proxy Configuration — VibeForge
+# LiteLLM Proxy Configuration — VibeForge (AWS Bedrock / Nova Pro)
 #
 # Contract C11: Every LLM call is routed through this proxy.
-#   - All agent code targets model alias "agent-model"
-#   - Proxy resolves to qwen3:8b on local Ollama
-#   - Every call is logged to Langfuse for observability
+#   - Provider: Amazon Bedrock (us-east-1) — uses $300 AWS free credits
+#   - Primary: Amazon Nova Pro — best available model, no access form needed
+#   - Embeddings: Amazon Titan Text Embeddings V2
 #   - Budget cap enforced per virtual key
-#   - Cost tracked even for local models (token-based proxy cost = $0 but
-#     token counts are recorded for governance)
+#
+# TO SWITCH TO CLAUDE 3 HAIKU (once AWS support grants access):
+#   Change every model value from:
+#     bedrock/amazon.nova-pro-v1:0
+#   To:
+#     bedrock/anthropic.claude-3-haiku-20240307-v1:0
+#   That is the only change needed.
+#
+# Model pricing (from AWS $300 credits):
+#   Nova Pro    : $0.0008 / 1K input tokens
+#   Titan Embed : $0.00002 / 1K tokens
+#   $5 budget cap = ~6M Nova Pro tokens/month per tenant
 #
 # Endpoints:
 #   Chat:    POST http://litellm:4000/v1/chat/completions
-#   Models:  GET  http://litellm:4000/v1/models
 #   Health:  GET  http://litellm:4000/health
-#   Metrics: GET  http://litellm:4000/metrics  (Prometheus)
 # =============================================================================
 
 model_list:
 
   # ---------------------------------------------------------------------------
-  # Primary agent model — Qwen3 8B via Ollama (local, zero egress cost)
-  # All agent orchestration calls use this alias.
+  # Primary agent model — Amazon Nova Pro (Bedrock, us-east-1)
+  # No use case form needed. Works immediately. Uses AWS $300 credits.
+  # TO SWITCH TO HAIKU: change model to:
+  #   bedrock/anthropic.claude-3-haiku-20240307-v1:0
   # ---------------------------------------------------------------------------
   - model_name: agent-model
     litellm_params:
-      model: ollama/qwen3:8b
-      api_base: http://ollama:11434
+      model: bedrock/amazon.nova-pro-v1:0
+      aws_region_name: us-east-1
       stream: true
       timeout: 120
       max_retries: 2
 
   # ---------------------------------------------------------------------------
-  # Fast model — used for simple classification, routing, and gate decisions
-  # Points to the same Ollama instance with a lower-param model option.
+  # Fast model — Nova Micro (lightweight, for routing/classification calls)
   # ---------------------------------------------------------------------------
   - model_name: fast-model
     litellm_params:
-      model: ollama/qwen3:8b     # same model for now; swap to qwen3:1.7b when available
-      api_base: http://ollama:11434
-      stream: true
+      model: bedrock/amazon.nova-micro-v1:0
+      aws_region_name: us-east-1
+      stream: false
       timeout: 30
       max_retries: 1
 
   # ---------------------------------------------------------------------------
-  # Embedding model — bge-m3 via Ollama (for retrieval-augmented generation)
-  # Note: actual embedding is done by the retrieval service directly;
-  #       this entry is here for completeness / future LiteLLM embedding calls.
+  # Smart model — Nova Pro with higher retry tolerance (escalation slot)
+  # ---------------------------------------------------------------------------
+  - model_name: smart-model
+    litellm_params:
+      model: bedrock/amazon.nova-pro-v1:0
+      aws_region_name: us-east-1
+      stream: true
+      timeout: 180
+      max_retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Embedding model — Amazon Titan Text Embeddings V2 (us-east-1)
+  # No restrictions. Replaces bge-m3 from local Ollama.
   # ---------------------------------------------------------------------------
   - model_name: embed-model
     litellm_params:
-      model: ollama/bge-m3
-      api_base: http://ollama:11434
+      model: bedrock/amazon.titan-embed-text-v2:0
+      aws_region_name: us-east-1
       timeout: 60
+
+
+# =============================================================================
+# Router settings — fallback chain (Contract C11)
+# If Nova Micro fails → automatically escalates to Nova Lite
+# =============================================================================
+router_settings:
+  routing_strategy: latency-based-routing
+  fallbacks:
+    - agent-model:
+        - smart-model    # Nova Micro → Nova Lite on failure
 
 
 # =============================================================================
 # LiteLLM-wide settings
 # =============================================================================
 litellm_settings:
-  # Observability — log every call to Langfuse (Phase 1: wired up and live)
-  success_callback: ["langfuse"]
-  failure_callback: ["langfuse"]
+  # Log every call (success + failure) for observability
+  # On AWS: pairs with CloudWatch (no Langfuse needed unless self-hosted)
+  success_callback: []
+  failure_callback: []
 
-  # Don't fail on unknown parameters (Ollama ignores some OpenAI params)
+  # Don't fail on extra parameters Bedrock ignores
   drop_params: true
 
-  # Reduce noise in logs
   set_verbose: false
 
-  # Request-level timeout guard
   request_timeout: 180
 
-  # Telemetry — disable LiteLLM's own usage reporting
   telemetry: false
 
 
@@ -79,39 +107,22 @@ litellm_settings:
 # General / server settings
 # =============================================================================
 general_settings:
-  # Master API key used internally by VibeForge services.
-  # Each agent gets a scoped virtual key with budget limits (Contract C11).
-  master_key: "sk-vibeforge-litellm-dev-change-me"
+  # Master API key — injected as env var LITELLM_MASTER_KEY by ECS task
+  master_key: ${LITELLM_MASTER_KEY}
 
   # Database for key management + spend tracking
-  # Reuses the vibeforge Postgres instance (litellm DB created by 00_create_dbs.sh)
-  database_url: "postgresql://vibeforge:vibeforge_dev_secret@postgres:5432/litellm"
+  # Points to RDS endpoint injected by ECS task definition
+  database_url: ${DATABASE_URL}
 
-  # Budget enforcement — Contract C11
-  # Local Ollama models have $0 real cost, but we track tokens and enforce
-  # a "virtual" budget cap to prevent runaway generation loops.
-  max_budget: 0.0             # $0 for local models (no real spend)
-  budget_duration: "30d"      # reset virtual budget monthly
+  # Real budget cap — Bedrock has actual cost per token
+  # Claude 3 Haiku: ~$0.25 per 1M input tokens → $5 = ~20M tokens/month
+  # That is enough for thousands of spec-to-code generation runs.
+  max_budget: 5.0
+  budget_duration: "30d"
 
-  # Store all request/response logs for audit
   store_model_in_db: true
 
-  # Allow UI key management at http://litellm:4000/ui
+  # LiteLLM admin UI
   ui_access_mode: "all"
   ui_username: "admin"
   ui_password: "admin"
-
-
-# =============================================================================
-# Environment variables injected at runtime (from .env via docker-compose)
-# These are read by LiteLLM's Langfuse callback handler.
-# =============================================================================
-environment_variables:
-  # Langfuse — LLM observability (tracing, evals)
-  # Keys are generated in the Langfuse UI at http://localhost:3001
-  LANGFUSE_SECRET_KEY: "sk-lf-vibeforge-dev-secret"
-  LANGFUSE_PUBLIC_KEY: "pk-lf-vibeforge-dev-public"
-  LANGFUSE_HOST: "http://langfuse:3000"
-
-  # Ollama host (override if running Ollama externally)
-  OLLAMA_API_BASE: "http://ollama:11434"

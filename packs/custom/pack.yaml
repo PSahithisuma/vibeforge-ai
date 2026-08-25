@@ -1,0 +1,27 @@
+name: custom
+version: "1.0.0"
+
+display_name: Custom Domain
+
+vertical: custom
+
+description: >
+  User-defined custom domain pack demonstrating that
+  a new business vertical can be introduced entirely
+  through YAML without orchestration-code changes.
+
+sections:
+  - events
+  - venues
+  - ticketing
+
+option_graph: option_graphs/custom.yaml
+
+schema_fragments:
+  - schema_fragments/events.yaml
+
+compliance_rules:
+  - compliance_rules/custom.yaml
+
+acceptance_seeds:
+  - acceptance_seeds/custom.feature

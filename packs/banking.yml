@@ -1,0 +1,139 @@
+sections:
+  - section_id: accounts
+    label: Accounts
+    description: Customer bank account management
+    prerequisite_options: []
+    options:
+      - option_id: bank_accounts
+        label: Bank Accounts
+        description: Add customer account management.
+        section: accounts
+        eligibility: []
+        spec_bindings:
+          - json_path: domain_model.entities
+            operation: append
+            value:
+              name: Account
+              fields:
+                - account_id
+                - customer_id
+                - account_type
+                - currency
+                - status
+        impact_hint: Adds customer account management.
+
+      - option_id: savings_account
+        label: Savings Account
+        description: Add savings account support.
+        section: accounts
+        eligibility:
+          - requires: bank_accounts
+        spec_bindings:
+          - json_path: domain_model.account_types
+            operation: append
+            value: SAVINGS
+        impact_hint: Adds SAVINGS account type.
+
+      - option_id: current_account
+        label: Current Account
+        description: Add current account support.
+        section: accounts
+        eligibility:
+          - requires: bank_accounts
+        spec_bindings:
+          - json_path: domain_model.account_types
+            operation: append
+            value: CURRENT
+        impact_hint: Adds CURRENT account type.
+
+  - section_id: payments
+    label: Payment Rails
+    description: Banking payment and transfer rails
+    prerequisite_options: []
+    options:
+      - option_id: upi
+        label: UPI Payments
+        description: Enable UPI payment processing.
+        section: payments
+        eligibility: []
+        spec_bindings:
+          - json_path: api_model.payment_rails
+            operation: append
+            value: UPI
+        impact_hint: Adds UPI payment rail.
+
+      - option_id: neft
+        label: NEFT Payments
+        description: Enable NEFT transfers.
+        section: payments
+        eligibility: []
+        spec_bindings:
+          - json_path: api_model.payment_rails
+            operation: append
+            value: NEFT
+        impact_hint: Adds NEFT payment rail.
+
+      - option_id: rtgs
+        label: RTGS Payments
+        description: Enable RTGS transfers.
+        section: payments
+        eligibility: []
+        spec_bindings:
+          - json_path: api_model.payment_rails
+            operation: append
+            value: RTGS
+        impact_hint: Adds RTGS payment rail.
+
+      - option_id: imps
+        label: IMPS Payments
+        description: Enable IMPS transfers.
+        section: payments
+        eligibility: []
+        spec_bindings:
+          - json_path: api_model.payment_rails
+            operation: append
+            value: IMPS
+        impact_hint: Adds IMPS payment rail.
+
+  - section_id: kyc
+    label: KYC
+    description: Customer KYC levels
+    prerequisite_options: []
+    options:
+      - option_id: kyc_basic
+        label: Basic KYC
+        description: Enable basic KYC verification.
+        section: kyc
+        eligibility: []
+        spec_bindings:
+          - json_path: security_model.kyc_levels
+            operation: append
+            value: BASIC
+        impact_hint: Adds BASIC KYC level.
+
+      - option_id: kyc_full
+        label: Full KYC
+        description: Enable full KYC verification.
+        section: kyc
+        eligibility: []
+        spec_bindings:
+          - json_path: security_model.kyc_levels
+            operation: append
+            value: FULL
+        impact_hint: Adds FULL KYC level.
+
+  - section_id: compliance
+    label: Compliance
+    description: Banking regulatory compliance
+    prerequisite_options: []
+    options:
+      - option_id: rbi_compliance
+        label: RBI Compliance
+        description: Apply RBI-aligned compliance requirements.
+        section: compliance
+        eligibility: []
+        spec_bindings:
+          - json_path: compliance_model.rules
+            operation: append
+            value: RBI
+        impact_hint: Adds RBI compliance requirements.

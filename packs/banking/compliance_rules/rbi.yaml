@@ -1,0 +1,22 @@
+pack: banking
+rules:
+
+  - id: RBI-KYC-001
+    category: kyc
+    description: Customer onboarding requires applicable KYC verification.
+    severity: high
+
+  - id: BANK-DATA-001
+    category: data_protection
+    description: Sensitive banking data must not be written to application logs.
+    severity: critical
+
+  - id: BANK-AUDIT-001
+    category: audit
+    description: Financial transactions must maintain an auditable record.
+    severity: high
+
+  - id: BANK-ACCESS-001
+    category: access_control
+    description: Banking operations must use authenticated and authorized access.
+    severity: critical

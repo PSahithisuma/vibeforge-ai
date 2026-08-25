@@ -1,0 +1,10 @@
+framework: CUSTOM_BASELINE
+
+rules:
+  - rule_id: CUSTOM-DATA-001
+    description: Protect customer and organizer data.
+    severity: medium
+
+  - rule_id: CUSTOM-AUDIT-001
+    description: Record important event and ticket operations.
+    severity: medium

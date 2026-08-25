@@ -1,0 +1,27 @@
+entity:
+  name: Shipment
+
+fields:
+  - name: shipment_id
+    type: uuid
+    required: true
+
+  - name: origin
+    type: string
+    required: true
+
+  - name: destination
+    type: string
+    required: true
+
+  - name: carrier
+    type: string
+
+  - name: status
+    type: enum
+    values:
+      - CREATED
+      - ASSIGNED
+      - IN_TRANSIT
+      - DELIVERED
+      - CANCELLED

@@ -39,7 +39,9 @@ from pydantic import BaseModel, Field
 from agents.harness.structured_output import StructuredOutputHarness, HarnessError
 from agents.generation.synthesizer import FileMapOutput, SynthesizedFile, STACK_CONVENTIONS
 from agents.generation.assembler import Assembler, AssemblyResult
-from agents.graphs.generation_graph import GateResult, FixPlan
+# FIX: import only GateResult — FixPlan was imported but never used here,
+# and reducing the circular-import surface area helps resolution order.
+from agents.graphs.generation_graph import GateResult
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +100,7 @@ Rules:
 2. Base your analysis ONLY on the GateReport facts provided. No guessing.
 3. For each failing file, copy the EXACT error message — do not paraphrase.
 4. Map each error to the file it came from. If the error says
-   "OrderService.java:45: error: cannot find symbol", the file_path is
+   "OrderService.java:45: error: cannot find symbol 'OrderRepository'", the file_path is
    the path to OrderService.java and the error is the exact message.
 5. failure_classification:
    - "mechanical" = a clear code error the Fixer can fix by reading the error
@@ -143,7 +145,7 @@ class ReviewerAgent:
     MODEL = "agent-model"   # → Qwen3-8B
 
     def __init__(self, llm_client, assembler: Optional[Assembler] = None):
-        self._harness = StructuredOutputHarness(llm_client)
+        self._harness   = StructuredOutputHarness(llm_client)
         self._assembler = assembler or Assembler()
 
     async def review(
@@ -216,7 +218,12 @@ class ReviewerAgent:
         if gate.failing_files:
             parts.append("\n## Failing files")
             for fpath in gate.failing_files:
-                owner = assembly.get_module_for_file(assembly, fpath) if hasattr(assembly, 'get_module_for_file') else "unknown"
+                # FIX: assembly is AssemblyResult (a dataclass), not Assembler.
+                # get_module_for_file() is a method on Assembler, not AssemblyResult.
+                # The old code called assembly.get_module_for_file(assembly, fpath)
+                # which always fell through to "unknown" via the hasattr guard.
+                # Correct approach: read file_ownership dict directly on AssemblyResult.
+                owner = assembly.file_ownership.get(fpath, "unknown")
                 parts.append(f"  {fpath} (module: {owner})")
 
         # Conflicts detected in assembly
@@ -229,8 +236,10 @@ class ReviewerAgent:
         criteria = spec.get("acceptance_criteria", [])
         if criteria:
             parts.append(f"\n## Acceptance criteria to verify ({len(criteria)} total)")
-            for ac in criteria[:5]:  # first 5
-                parts.append(f"  [{ac.get('criterion_id', '?')}] {ac.get('scenario', '')[:100]}")
+            for ac in criteria[:5]:
+                parts.append(
+                    f"  [{ac.get('criterion_id', '?')}] {ac.get('scenario', '')[:100]}"
+                )
 
         parts.append(
             f"\n## Task\n"
@@ -252,7 +261,7 @@ class ReviewerAgent:
             for step in failed_steps:
                 if step.output:
                     errors.append(f"[{step.step}] {step.output[:200]}")
-            # Use file_ownership dict directly — no method call needed
+            # Read file_ownership directly from the AssemblyResult dataclass
             module_id = assembly.file_ownership.get(fpath, "unknown")
             instructions.append(FileFixInstruction(
                 file_path=fpath,
@@ -282,9 +291,9 @@ class FixerAgent:
     MODEL = "coder-model"   # → Qwen2.5-Coder-32B
 
     def __init__(self, llm_client, stack_profile: str = "java_spring"):
-        self._harness = StructuredOutputHarness(llm_client)
-        self._stack = stack_profile
-        self._assembler = Assembler()
+        self._harness    = StructuredOutputHarness(llm_client)
+        self._stack      = stack_profile
+        self._assembler  = Assembler()
 
     async def fix(
         self,
@@ -379,9 +388,7 @@ class FixerAgent:
             parts.append(f"\n## Reviewer analysis\n{instruction.fix_guidance}")
 
         parts.append(f"\n## Stack conventions\n{conventions}")
-
         parts.append(f"\n## Current file content\n```\n{current_content[:2000]}\n```")
-
         parts.append(
             f"\n## Task\n"
             f"Regenerate '{instruction.file_path}' (module: {instruction.module_id}) "
@@ -481,18 +488,18 @@ Avoid: "it might help", "could be useful". Prefer: "entity X is not in context",
                 output.rationale[:80],
             )
             return {
-                "verdict": output.verdict,
-                "narrow_query": output.narrow_query,
-                "rationale": output.rationale,
-                "confidence": output.confidence,
-                "tier": 1,
+                "verdict":       output.verdict,
+                "narrow_query":  output.narrow_query,
+                "rationale":     output.rationale,
+                "confidence":    output.confidence,
+                "tier":          1,
             }
         except HarnessError:
             # Tier 1 failure → default NOT_NEEDED (conservative)
             return {
-                "verdict": "NOT_NEEDED",
+                "verdict":      "NOT_NEEDED",
                 "narrow_query": "",
-                "rationale": "Tier 1 arbiter failed — defaulting to NOT_NEEDED (conservative)",
-                "confidence": 0.3,
-                "tier": 1,
+                "rationale":    "Tier 1 arbiter failed — defaulting to NOT_NEEDED (conservative)",
+                "confidence":   0.3,
+                "tier":         1,
             }

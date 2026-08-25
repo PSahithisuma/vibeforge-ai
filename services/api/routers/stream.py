@@ -13,7 +13,23 @@ from core.redis_client import get_redis
 
 router = APIRouter(prefix="/api/v1/jobs", tags=["stream"])
 
+# Match jobs table status values written by the worker
 _TERMINAL: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
+
+
+def _normalise_payload(raw) -> dict:
+    """
+    job_events.payload may come back as dict (JSONB) or str (TEXT).
+    Always return a dict so json.dumps never double-encodes.
+    """
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return {"raw": raw}
+    return {}
 
 
 @router.get(
@@ -26,20 +42,17 @@ async def stream_job_events(
     user: AuthUser = Depends(get_current_user),
 ) -> EventSourceResponse:
     """
-    Server-Sent Events endpoint — streams job_events in real-time.
+    Server-Sent Events endpoint -- streams job_events in real-time.
 
-    Flow:
-    • If job is still running → subscribe to Redis pub/sub channel `job:{job_id}`.
-      Each progress event emitted by the Arq worker is forwarded instantly.
-      Stream closes when we receive an event with event_type == 'complete' | 'error'.
+    Path A (terminal job): replay all historical events from Postgres,
+    emit a synthetic "done" event, then close.
 
-    • If job is already in a terminal state → replay all historical events from
-      Postgres and immediately close — the client gets the full picture without
-      waiting on pub/sub.
+    Path B (running job): subscribe to Redis pub/sub channel job:{job_id},
+    forward each event to the client, close when event_type is
+    "complete" or "error".
 
-    Auth: tenant_id from JWT → RLS enforced on DB queries.
+    Auth: tenant_id from JWT -> RLS enforced on DB queries.
     """
-    # Verify the job exists and belongs to this tenant
     async with get_tenant_session(user.tenant_id) as session:
         row = (
             await session.execute(
@@ -53,42 +66,43 @@ async def stream_job_events(
 
     current_status: str = row.status
 
-    # ── Generator ─────────────────────────────────────────────────────────────
+    # -- Generator ------------------------------------------------------------
 
     async def event_generator():
 
-        # ── Path A: job already terminal — replay from DB ──────────────────
+        # Path A: already terminal -- replay from Postgres ------------------
         if current_status in _TERMINAL:
             async with get_tenant_session(user.tenant_id) as session:
                 events = (
                     await session.execute(
                         text("""
                             SELECT event_type, payload
-                            FROM job_events
-                            WHERE job_id = :job_id
-                            ORDER BY seq ASC
+                              FROM job_events
+                             WHERE job_id = :job_id
+                             ORDER BY seq ASC
                         """),
                         {"job_id": str(job_id)},
                     )
                 ).mappings().all()
 
             for evt in events:
+                payload = _normalise_payload(evt["payload"])
                 yield {
                     "event": evt["event_type"],
                     "data": json.dumps({
                         "event_type": evt["event_type"],
-                        "payload": evt["payload"],
+                        "payload":    payload,
                     }),
                 }
 
-            # Synthetic terminal signal so client can close cleanly
+            # Synthetic terminal signal so the client can close cleanly
             yield {
                 "event": "done",
                 "data": json.dumps({"status": current_status}),
             }
             return
 
-        # ── Path B: job running — subscribe to Redis pub/sub ───────────────
+        # Path B: job running -- subscribe to Redis pub/sub -----------------
         redis = get_redis()
         pubsub = redis.pubsub()
         channel = f"job:{job_id}"
@@ -97,7 +111,7 @@ async def stream_job_events(
         try:
             async for message in pubsub.listen():
                 if message["type"] != "message":
-                    # 'subscribe' ack messages — skip
+                    # "subscribe" ack messages -- skip
                     continue
 
                 raw: str = message["data"]
@@ -108,9 +122,16 @@ async def stream_job_events(
 
                 event_type: str = parsed.get("event_type", "message")
 
-                yield {"event": event_type, "data": raw}
+                # Normalise payload in forwarded events too
+                if "payload" in parsed and isinstance(parsed["payload"], str):
+                    try:
+                        parsed["payload"] = json.loads(parsed["payload"])
+                    except (json.JSONDecodeError, ValueError):
+                        pass
 
-                # Close the generator on terminal event — client will disconnect
+                yield {"event": event_type, "data": json.dumps(parsed)}
+
+                # Close generator on terminal event -- client will disconnect
                 if event_type in ("complete", "error"):
                     break
 

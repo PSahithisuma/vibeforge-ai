@@ -1,0 +1,218 @@
+﻿sections:
+  - section_id: accounts
+    title: Bank Accounts
+    prerequisites: []
+
+    options:
+      - option_id: bank_accounts
+        label: Bank Accounts
+        description: Add customer account management.
+
+        eligibility_rules:
+          - rule_type: none
+
+        spec_bindings:
+          - json_path: domain_model.entities
+            operation: append_if_missing
+            value:
+              name: Account
+              description: Customer bank account
+              fields:
+                - name: account_id
+                  field_type: uuid
+                  required: true
+                - name: customer_id
+                  field_type: uuid
+                  required: true
+                - name: account_type
+                  field_type: string
+                  required: true
+                - name: currency
+                  field_type: string
+                  required: true
+                - name: status
+                  field_type: string
+                  required: true
+
+          - json_path: api_model.endpoints
+            operation: append_if_missing
+            value:
+              endpoint_id: create_account
+              method: POST
+              path: /api/v1/accounts
+              summary: Create a customer bank account
+              description: Create a new bank account for a customer.
+              auth_required: true
+              roles:
+                - CUSTOMER
+              request_params:
+                - name: customer_id
+                  param_type: body
+                  field_type: uuid
+                  required: true
+                  description: Customer identifier
+                - name: account_type
+                  param_type: body
+                  field_type: string
+                  required: true
+                  description: Type of bank account
+                - name: currency
+                  param_type: body
+                  field_type: string
+                  required: true
+                  description: Account currency
+              request_body_entity: Account
+              response_entity: Account
+              tags:
+                - accounts
+              acceptance_criteria_ids:
+                - AC-BANK-001
+
+          - json_path: security_model.roles
+            operation: append_if_missing
+            value:
+              name: CUSTOMER
+              description: Banking customer
+              permissions:
+                - account:read
+                - account:create
+                - account:update
+
+          - json_path: acceptance_criteria
+            operation: append_if_missing
+            value:
+              criterion_id: AC-BANK-001
+              feature: Account creation
+              scenario: >
+                Given a valid banking customer
+                When they create a bank account
+                Then an Account is created successfully
+              endpoint_ids:
+                - create_account
+              priority: must
+              automated: true
+
+      - option_id: savings_account
+        label: Savings Account
+        description: Add savings account support.
+
+        eligibility_rules:
+          - rule_type: requires_option
+            option_id: bank_accounts
+
+        spec_bindings:
+          - json_path: domain_model.account_types
+            operation: append_if_missing
+            value: SAVINGS
+
+      - option_id: current_account
+        label: Current Account
+        description: Add current account support.
+
+        eligibility_rules:
+          - rule_type: requires_option
+            option_id: bank_accounts
+
+        spec_bindings:
+          - json_path: domain_model.account_types
+            operation: append_if_missing
+            value: CURRENT
+
+  - section_id: payments
+    title: Payment Rails
+    prerequisites: []
+
+    options:
+      - option_id: upi
+        label: UPI Payments
+        description: Enable UPI payment processing.
+
+        eligibility_rules:
+          - rule_type: none
+
+        spec_bindings:
+          - json_path: api_model.payment_rails
+            operation: append_if_missing
+            value: UPI
+
+      - option_id: neft
+        label: NEFT Payments
+        description: Enable NEFT transfers.
+
+        eligibility_rules:
+          - rule_type: none
+
+        spec_bindings:
+          - json_path: api_model.payment_rails
+            operation: append_if_missing
+            value: NEFT
+
+      - option_id: rtgs
+        label: RTGS Payments
+        description: Enable RTGS transfers.
+
+        eligibility_rules:
+          - rule_type: none
+
+        spec_bindings:
+          - json_path: api_model.payment_rails
+            operation: append_if_missing
+            value: RTGS
+
+      - option_id: imps
+        label: IMPS Payments
+        description: Enable IMPS transfers.
+
+        eligibility_rules:
+          - rule_type: none
+
+        spec_bindings:
+          - json_path: api_model.payment_rails
+            operation: append_if_missing
+            value: IMPS
+
+  - section_id: kyc
+    title: KYC
+    prerequisites: []
+
+    options:
+      - option_id: kyc_basic
+        label: Basic KYC
+        description: Enable basic KYC verification.
+
+        eligibility_rules:
+          - rule_type: none
+
+        spec_bindings:
+          - json_path: security_model.kyc_levels
+            operation: append_if_missing
+            value: BASIC
+
+      - option_id: kyc_full
+        label: Full KYC
+        description: Enable full KYC verification.
+
+        eligibility_rules:
+          - rule_type: none
+
+        spec_bindings:
+          - json_path: security_model.kyc_levels
+            operation: append_if_missing
+            value: FULL
+
+  - section_id: compliance
+    title: Banking Compliance
+    prerequisites: []
+
+    options:
+      - option_id: rbi_compliance
+        label: RBI Compliance
+        description: Apply RBI-aligned compliance requirements.
+
+        eligibility_rules:
+          - rule_type: none
+
+        spec_bindings:
+          - json_path: compliance_model.rules
+            operation: append_if_missing
+            value: RBI

@@ -1,0 +1,35 @@
+entity:
+  name: Transaction
+
+fields:
+  - name: transaction_id
+    type: uuid
+    required: true
+
+  - name: account_id
+    type: uuid
+    required: true
+
+  - name: amount
+    type: decimal
+    required: true
+
+  - name: currency
+    type: string
+    required: true
+
+  - name: payment_rail
+    type: enum
+    values:
+      - UPI
+      - NEFT
+      - RTGS
+      - IMPS
+
+  - name: status
+    type: enum
+    values:
+      - INITIATED
+      - PROCESSING
+      - SUCCESS
+      - FAILED

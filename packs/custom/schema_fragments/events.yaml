@@ -1,0 +1,9 @@
+domain: event_management
+
+entities:
+  - Event
+  - Venue
+  - Ticket
+
+description: >
+  Custom event-management domain entities.

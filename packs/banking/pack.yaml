@@ -1,0 +1,33 @@
+name: banking
+version: "1.0.0"
+display_name: Banking
+vertical: banking
+
+description: >
+  Banking domain pack supporting accounts, payments,
+  KYC and RBI-aligned compliance requirements.
+
+sections:
+  - accounts
+  - payments
+  - kyc
+  - compliance
+
+option_graph: option_graphs/banking.yaml
+
+schema_fragments:
+  - schema_fragments/accounts.yaml
+  - schema_fragments/transactions.yaml
+
+workflow_templates:
+  - workflow_templates/onboarding.yaml
+  - workflow_templates/payment.yaml
+
+compliance_rules:
+  - compliance_rules/rbi.yaml
+
+connectors:
+  - connectors/payment_rails.yaml
+
+acceptance_seeds:
+  - acceptance_seeds/banking.feature

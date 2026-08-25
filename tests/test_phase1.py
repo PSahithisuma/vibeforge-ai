@@ -683,8 +683,8 @@ class TestExpandedEcommercePack:
         gate_file = ROOT / "agents" / "gates" / "metacognition.py"
         graph_file = ROOT / "agents" / "graphs" / "generation_graph.py"
 
-        gate_content = gate_file.read_text()
-        graph_content = graph_file.read_text()
+        gate_content = gate_file.read_text(encoding="utf-8")
+        graph_content = graph_file.read_text(encoding="utf-8")
 
         assert "ecommerce" not in gate_content.lower(), \
             "metacognition.py must not reference a specific vertical (C12 violated)"

@@ -1,0 +1,183 @@
+sections:
+
+  - section_id: shipments
+    title: Shipments
+    prerequisites: []
+
+    options:
+
+      - option_id: shipment_management
+        label: Shipment Management
+        description: Add shipment creation and lifecycle management.
+
+        eligibility_rules:
+          - rule_type: none
+
+        spec_bindings:
+
+          - json_path: domain_model.entities
+            operation: append_if_missing
+            value:
+              name: Shipment
+              description: Shipment managed by the logistics platform
+              fields:
+                - name: shipment_id
+                  field_type: uuid
+                  required: true
+                - name: origin
+                  field_type: string
+                  required: true
+                - name: destination
+                  field_type: string
+                  required: true
+                - name: status
+                  field_type: string
+                  required: true
+
+          - json_path: api_model.endpoints
+            operation: append_if_missing
+            value:
+              endpoint_id: create_shipment
+              method: POST
+              path: /api/v1/shipments
+              summary: Create a shipment
+              description: Create a new shipment for logistics operations.
+              auth_required: true
+              roles:
+                - OPERATOR
+              request_params:
+                - name: origin
+                  param_type: body
+                  field_type: string
+                  required: true
+                  description: Shipment origin
+                - name: destination
+                  param_type: body
+                  field_type: string
+                  required: true
+                  description: Shipment destination
+              request_body_entity: Shipment
+              response_entity: Shipment
+              tags:
+                - shipments
+              acceptance_criteria_ids:
+                - AC-LOG-001
+
+          - json_path: security_model.roles
+            operation: append_if_missing
+            value:
+              name: OPERATOR
+              description: Logistics platform operator
+              permissions:
+                - shipment:read
+                - shipment:create
+                - shipment:update
+
+          - json_path: acceptance_criteria
+            operation: append_if_missing
+            value:
+              criterion_id: AC-LOG-001
+              feature: Shipment creation
+              scenario: >
+                Given a valid logistics operator
+                When they create a shipment
+                Then the shipment is created successfully
+              endpoint_ids:
+                - create_shipment
+              priority: must
+              automated: true
+
+      - option_id: proof_of_delivery
+        label: Proof of Delivery
+        description: Enable proof-of-delivery workflow capability.
+
+        eligibility_rules:
+          - rule_type: requires_option
+            option_id: shipment_management
+
+        spec_bindings:
+          - json_path: workflow_model.capabilities
+            operation: append_if_missing
+            value: PROOF_OF_DELIVERY
+
+  - section_id: routing
+    title: Routing
+    prerequisites: []
+
+    options:
+
+      - option_id: route_planning
+        label: Route Planning
+        description: Enable route planning for shipments.
+
+        eligibility_rules:
+          - rule_type: requires_option
+            option_id: shipment_management
+
+        spec_bindings:
+          - json_path: workflow_model.capabilities
+            operation: append_if_missing
+            value: ROUTE_PLANNING
+
+      - option_id: geo_tracking
+        label: Geo Tracking
+        description: Enable geographic tracking of shipments.
+
+        eligibility_rules:
+          - rule_type: requires_option
+            option_id: shipment_management
+
+        spec_bindings:
+          - json_path: workflow_model.capabilities
+            operation: append_if_missing
+            value: GEO_TRACKING
+
+  - section_id: warehouse
+    title: Warehouse
+    prerequisites: []
+
+    options:
+
+      - option_id: warehouse_management
+        label: Warehouse Management
+        description: Add warehouse management capabilities.
+
+        eligibility_rules:
+          - rule_type: none
+
+        spec_bindings:
+
+          - json_path: domain_model.entities
+            operation: append_if_missing
+            value:
+              name: Warehouse
+              description: Warehouse used for logistics operations
+              fields:
+                - name: warehouse_id
+                  field_type: uuid
+                  required: true
+                - name: location
+                  field_type: string
+                  required: true
+                - name: capacity
+                  field_type: integer
+                  required: true
+
+  - section_id: carriers
+    title: Carrier Integrations
+    prerequisites: []
+
+    options:
+
+      - option_id: carrier_integration
+        label: Carrier Integration
+        description: Enable integration with external carrier providers.
+
+        eligibility_rules:
+          - rule_type: none
+
+        spec_bindings:
+
+          - json_path: integration_model.providers
+            operation: append_if_missing
+            value: CARRIER

@@ -71,8 +71,6 @@ class FileMapOutput(BaseModel):
 
 
 # ── Stack conventions per profile ─────────────────────────────────────────────
-# These are read from the stack profile's conventions.md in production.
-# In Phase 2, we inline the most critical ones here as a bootstrap.
 
 STACK_CONVENTIONS: dict[str, str] = {
     "java_spring": """\
@@ -86,7 +84,7 @@ Naming conventions:
 - DTOs: suffix Request (input) or Response (output)
 
 Field rules:
-- Primary key: @Id @GeneratedValue(strategy=GenerationType.UUID) UUID id
+- Primary key: @Id @GeneratedValue(strategy = GenerationType.UUID) UUID id
 - Timestamps: @CreatedDate Instant createdAt; @LastModifiedDate Instant updatedAt
 - Money: BigDecimal (never double/float)
 - Soft delete: Boolean deletedAt (Instant null = not deleted)
@@ -138,8 +136,6 @@ Security: [Authorize] attribute + Policy-based authorization
 }
 
 # ── Stack exemplars (gold few-shot examples) ───────────────────────────────────
-# One entity + repository example per stack.
-# In production these come from the stack profile's exemplars/ folder.
 
 ENTITY_EXEMPLAR: dict[str, str] = {
     "java_spring": """\
@@ -284,7 +280,7 @@ class SynthesizerAgent:
         """
         spec_slice = self._extract_spec_slice(module, spec_dict)
         interfaces = self._extract_interfaces(module, previously_synthesized or {})
-        prompt = self._build_prompt(module, spec_slice, interfaces, gate_errors)
+        prompt     = self._build_prompt(module, spec_slice, interfaces, gate_errors)
 
         try:
             output, meta = await self._harness.call(
@@ -295,7 +291,7 @@ class SynthesizerAgent:
                 context_tag=f"synthesizer:{module.module_id}:{job_id or 'unknown'}",
                 max_attempts=3,
             )
-            output.module_id = module.module_id
+            output.module_id   = module.module_id
             output.module_name = module.name
 
             logger.info(
@@ -309,7 +305,6 @@ class SynthesizerAgent:
                 "[Synthesizer] Module %s failed all harness attempts: %s",
                 module.name, e,
             )
-            # Return stub files — gate will catch them and fixer will retry
             return self._stub_fallback(module)
 
     # ── Prompt builder ─────────────────────────────────────────────────────────
@@ -323,26 +318,21 @@ class SynthesizerAgent:
     ) -> str:
         parts = []
 
-        # Stack conventions (from profile)
         conventions = STACK_CONVENTIONS.get(self._stack, STACK_CONVENTIONS["java_spring"])
         parts.append(f"## Stack conventions\n{conventions}")
 
-        # Exemplar — gold few-shot
         exemplar = ENTITY_EXEMPLAR.get(self._stack, "")
         if exemplar and module.module_type == "entity":
             parts.append(f"## Style exemplar (match this exactly)\n{exemplar}")
 
-        # Spec slice — only what this module needs
         parts.append(
             f"## Spec slice for module '{module.name}'\n"
             f"{json.dumps(spec_slice, indent=2)}"
         )
 
-        # Interface stubs from previously synthesized modules
         if interfaces:
             parts.append(f"## Interface stubs from earlier modules\n{interfaces}")
 
-        # Gate errors — ALWAYS present when this is a fix attempt (Contract C5)
         if gate_errors:
             parts.append("## GATE ERRORS — fix these exactly (do not invent fixes)")
             for filepath, errors in gate_errors.items():
@@ -350,7 +340,6 @@ class SynthesizerAgent:
                 for err in errors:
                     parts.append(f"  ERROR: {err}")
 
-        # Task
         parts.append(
             f"\n## Task\n"
             f"Generate the '{module.name}' module (type: {module.module_type}).\n"
@@ -373,44 +362,69 @@ class SynthesizerAgent:
         """
         Extract only the spec sections this module needs.
         Prevents the prompt from including irrelevant spec sections.
+
+        Handles three path forms:
+          "domain_model.entities"         → all entities
+          "domain_model.entities.Product" → only the Product entity (name filter)
+          "api_model.endpoints"           → all endpoints
         """
         slice_dict: dict[str, Any] = {}
-
-        # Always include stack info
-        slice_dict["stack"] = spec.get("stack", {})
+        slice_dict["stack"]   = spec.get("stack", {})
         slice_dict["vertical"] = spec.get("vertical", "")
 
-        # Add sections from spec_paths declared in the module plan
         for path in module.spec_paths:
             parts = path.split(".")
             src = spec
             dst = slice_dict
+
             for i, part in enumerate(parts):
-                if i == len(parts) - 1:
-                    # Leaf — handle both dict and list[dict] with name matching
-                    src_val = src.get(part) if isinstance(src, dict) else None
-                    if src_val is not None:
-                        if isinstance(src_val, list):
-                            # Filter by entity name if the path specifies one
-                            # e.g. spec_paths=["domain_model.entities.Product"]
-                            # "Product" is a filter, not a real dict key
-                            entity_filter = parts[i] if len(parts) > 2 else None
-                            if entity_filter and entity_filter[0].isupper():
-                                src_val = [
-                                    e for e in src_val
-                                    if e.get("name") == entity_filter
-                                ]
+                is_last = (i == len(parts) - 1)
+
+                if not isinstance(src, dict):
+                    break  # can't navigate further into a non-dict
+
+                src_val = src.get(part)
+                if src_val is None:
+                    break  # path doesn't exist in this spec
+
+                if is_last:
+                    # ── Leaf: store the value ────────────────────────────────
+                    dst[part] = src_val
+
+                elif isinstance(src_val, list):
+                    # ── List in middle of path ───────────────────────────────
+                    # The next path part may be an entity-name filter (PascalCase).
+                    # e.g. "domain_model.entities.Product" → filter entities by name.
+                    next_part = parts[i + 1]
+                    if next_part and next_part[0].isupper():
+                        # Filter the list and store immediately — consume next part too.
+                        filtered = [
+                            e for e in src_val
+                            if isinstance(e, dict) and e.get("name") == next_part
+                        ]
+                        # Merge into existing list (other paths may have added items).
+                        existing = dst.get(part)
+                        if not isinstance(existing, list):
+                            existing = []
+                        seen_names = {e.get("name") for e in existing if isinstance(e, dict)}
+                        for item in filtered:
+                            if item.get("name") not in seen_names:
+                                existing.append(item)
+                        dst[part] = existing
+                    else:
+                        # No entity filter — store the whole list and stop.
                         dst[part] = src_val
+                    break  # list node is always terminal in our path grammar
+
                 else:
-                    src = src.get(part, {}) if isinstance(src, dict) else {}
+                    # ── Dict in middle of path — navigate deeper ─────────────
+                    src = src_val
                     dst = dst.setdefault(part, {})
 
-        # Always add security roles for auth annotations
+        # Always include security roles and compliance (needed for annotations).
         slice_dict["security_model"] = {
             "roles": spec.get("security_model", {}).get("roles", [])
         }
-
-        # Add compliance frameworks for annotation decisions
         slice_dict["compliance"] = {
             "frameworks": spec.get("compliance_model", {}).get("frameworks", [])
         }
@@ -428,9 +442,8 @@ class SynthesizerAgent:
         Extract method signatures from previously synthesized modules
         that this module depends on.
 
-        The full code is too large for the prompt — we extract just the
-        public interface (class name, method signatures, return types).
-        This is enough for the Synthesizer to use the dependency correctly.
+        Only public interfaces (class name + method signatures) are included —
+        not full bodies — to keep prompt size manageable.
         """
         if not module.dependencies or not previously_synthesized:
             return ""
@@ -439,33 +452,49 @@ class SynthesizerAgent:
         for dep_id in module.dependencies:
             for filename, code in previously_synthesized.items():
                 if dep_id.lower().replace("_", "") in filename.lower().replace("_", ""):
-                    # Extract just the class declaration and method signatures
                     lines = code.split("\n")
-                    sig_lines = []
+                    sig_lines: list[str] = []
                     in_class = False
                     brace_depth = 0
 
                     for line in lines:
                         stripped = line.strip()
+
                         if "class " in stripped or "interface " in stripped:
                             in_class = True
+
                         if in_class:
                             brace_depth += stripped.count("{") - stripped.count("}")
-                            # Include class declaration and public method signatures
-                            if (
+
+                            # FIX: operator precedence was wrong in original.
+                            # Original: (A or B or C or D) and E or F
+                            # Python evaluates as: ((A or B or C or D) and E) or F
+                            # which always included lines containing "class" (F),
+                            # even deep inside method bodies.
+                            #
+                            # Correct intent: include lines that match a pattern AND
+                            # either have no opening brace (method signatures, annotations)
+                            # OR are class/interface declarations (which naturally have {).
+                            is_declaration = (
+                                "class " in stripped or "interface " in stripped
+                            )
+                            is_signature_line = (
                                 "public " in stripped
-                                or "class " in stripped
-                                or "interface " in stripped
+                                or is_declaration
                                 or stripped.startswith("@")
-                            ) and "{" not in stripped or "class" in stripped:
+                            )
+                            has_no_body = "{" not in stripped
+
+                            if is_signature_line and (has_no_body or is_declaration):
                                 sig_lines.append(line)
+
                             if brace_depth == 0 and in_class and stripped == "}":
                                 break
 
                     if sig_lines:
                         interfaces.append(
                             f"// Interface from {filename.split('/')[-1]}:\n"
-                            + "\n".join(sig_lines[:30])  # cap at 30 lines
+                            + "\n".join(sig_lines[:30])
                         )
                     break
 
@@ -480,15 +509,15 @@ class SynthesizerAgent:
         with the real compiler error in-prompt.
         """
         lang_ext = {
-            "java_spring": "java",
+            "java_spring":   "java",
             "python_fastapi": "py",
-            "dotnet": "cs",
+            "dotnet":        "cs",
         }.get(self._stack, "java")
 
         pkg_path = {
-            "java_spring": f"src/main/java/com/app/{module.name.lower()}/{module.name}",
+            "java_spring":   f"src/main/java/com/app/{module.name.lower()}/{module.name}",
             "python_fastapi": f"app/{module.name.lower()}/{module.name.lower()}",
-            "dotnet": f"src/{module.name}",
+            "dotnet":        f"src/{module.name}",
         }.get(self._stack, f"src/{module.name}")
 
         return FileMapOutput(
@@ -497,7 +526,10 @@ class SynthesizerAgent:
             files=[
                 SynthesizedFile(
                     filename=f"{pkg_path}.{lang_ext}",
-                    content=f"// SYNTHESIS FAILED: {module.name}\n// Gate will catch this and Fixer will retry with real errors",
+                    content=(
+                        f"// SYNTHESIS FAILED: {module.name}\n"
+                        f"// Gate will catch this and Fixer will retry with real errors"
+                    ),
                     language=lang_ext,
                 )
             ],

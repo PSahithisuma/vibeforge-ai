@@ -1,0 +1,28 @@
+entity:
+  name: Account
+
+fields:
+  - name: account_id
+    type: uuid
+    required: true
+
+  - name: customer_id
+    type: uuid
+    required: true
+
+  - name: account_type
+    type: enum
+    values:
+      - SAVINGS
+      - CURRENT
+
+  - name: currency
+    type: string
+
+  - name: status
+    type: enum
+    values:
+      - ACTIVE
+      - BLOCKED
+      - CLOSED
+      

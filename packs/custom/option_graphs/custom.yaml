@@ -1,0 +1,238 @@
+sections:
+
+  - section_id: events
+    title: Event Management
+    prerequisites: []
+
+    options:
+
+      - option_id: event_management
+        label: Event Management
+        description: Add event creation and management.
+
+        eligibility_rules:
+          - rule_type: none
+
+        spec_bindings:
+
+          - json_path: domain_model.entities
+            operation: append_if_missing
+            value:
+              name: Event
+              description: Event managed by the platform
+              fields:
+                - name: event_id
+                  field_type: uuid
+                  required: true
+                - name: name
+                  field_type: string
+                  required: true
+                - name: event_date
+                  field_type: datetime
+                  required: true
+                - name: venue_id
+                  field_type: uuid
+                  required: true
+                - name: status
+                  field_type: string
+                  required: true
+
+          - json_path: api_model.endpoints
+            operation: append_if_missing
+            value:
+              endpoint_id: create_event
+              method: POST
+              path: /api/v1/events
+              summary: Create an event
+              description: Create a new event.
+              auth_required: true
+              roles:
+                - ORGANIZER
+              request_params:
+                - name: name
+                  param_type: body
+                  field_type: string
+                  required: true
+                - name: event_date
+                  param_type: body
+                  field_type: datetime
+                  required: true
+              request_body_entity: Event
+              response_entity: Event
+              tags:
+                - events
+              acceptance_criteria_ids:
+                - AC-CUSTOM-001
+
+          - json_path: security_model.roles
+            operation: append_if_missing
+            value:
+              name: ORGANIZER
+              description: Event organizer
+              permissions:
+                - event:read
+                - event:create
+                - event:update
+
+          - json_path: acceptance_criteria
+            operation: append_if_missing
+            value:
+              criterion_id: AC-CUSTOM-001
+              feature: Event creation
+              scenario: >
+                Given a valid event organizer
+                When they create an event
+                Then the event is created successfully
+              endpoint_ids:
+                - create_event
+              priority: must
+              automated: true
+
+
+      - option_id: recurring_events
+        label: Recurring Events
+        description: Enable recurring event support.
+
+        eligibility_rules:
+          - rule_type: requires_option
+            option_id: event_management
+
+        spec_bindings:
+
+          - json_path: workflow_model.capabilities
+            operation: append_if_missing
+            value: RECURRING_EVENTS
+
+
+  - section_id: venues
+    title: Venue Management
+    prerequisites: []
+
+    options:
+
+      - option_id: venue_management
+        label: Venue Management
+        description: Add venue management.
+
+        eligibility_rules:
+          - rule_type: none
+
+        spec_bindings:
+
+          - json_path: domain_model.entities
+            operation: append_if_missing
+            value:
+              name: Venue
+              description: Venue where an event takes place
+              fields:
+                - name: venue_id
+                  field_type: uuid
+                  required: true
+                - name: name
+                  field_type: string
+                  required: true
+                - name: address
+                  field_type: string
+                  required: true
+                - name: capacity
+                  field_type: integer
+                  required: true
+
+          - json_path: api_model.endpoints
+            operation: append_if_missing
+            value:
+              endpoint_id: create_venue
+              method: POST
+              path: /api/v1/venues
+              summary: Create a venue
+              description: Create a new event venue.
+              auth_required: true
+              roles:
+                - ORGANIZER
+              request_params:
+                - name: name
+                  param_type: body
+                  field_type: string
+                  required: true
+                - name: capacity
+                  param_type: body
+                  field_type: integer
+                  required: true
+              request_body_entity: Venue
+              response_entity: Venue
+              tags:
+                - venues
+
+
+  - section_id: ticketing
+    title: Ticketing
+    prerequisites: []
+
+    options:
+
+      - option_id: ticketing
+        label: Event Ticketing
+        description: Add ticket purchasing capability.
+
+        eligibility_rules:
+          - rule_type: requires_option
+            option_id: event_management
+
+        spec_bindings:
+
+          - json_path: domain_model.entities
+            operation: append_if_missing
+            value:
+              name: Ticket
+              description: Ticket issued for an event
+              fields:
+                - name: ticket_id
+                  field_type: uuid
+                  required: true
+                - name: event_id
+                  field_type: uuid
+                  required: true
+                - name: customer_id
+                  field_type: uuid
+                  required: true
+                - name: price
+                  field_type: money
+                  required: true
+                - name: status
+                  field_type: string
+                  required: true
+
+          - json_path: api_model.endpoints
+            operation: append_if_missing
+            value:
+              endpoint_id: purchase_ticket
+              method: POST
+              path: /api/v1/tickets
+              summary: Purchase an event ticket
+              description: Purchase a ticket for an event.
+              auth_required: true
+              roles:
+                - CUSTOMER
+              request_params:
+                - name: event_id
+                  param_type: body
+                  field_type: uuid
+                  required: true
+                - name: customer_id
+                  param_type: body
+                  field_type: uuid
+                  required: true
+              request_body_entity: Ticket
+              response_entity: Ticket
+              tags:
+                - ticketing
+
+          - json_path: security_model.roles
+            operation: append_if_missing
+            value:
+              name: CUSTOMER
+              description: Event customer
+              permissions:
+                - event:read
+                - ticket:create
+                - ticket:read

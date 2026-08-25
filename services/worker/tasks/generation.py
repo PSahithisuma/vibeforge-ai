@@ -1,351 +1,228 @@
 """
-VibeForge — Generation Task (Phase 1 wiring)
+VibeForge -- Generation Task (Phase 1 wiring)
 =============================================
-This replaces dummy.py. It is the real Arq task that runs when
-a user clicks "Generate Spec" in the UI.
+Arq task that runs when a user clicks "Generate Spec" in the UI.
 
 Flow:
-    1. Load the spec from Postgres (compiled from option selections)
-    2. Run CompletenessValidator Layer 1 — block if required fields missing
-    3. Run CompletenessValidator Layer 2 — generate gap questions via Qwen3-8B
-    4. If spec is complete → run the LangGraph generation pipeline
-    5. Stream progress events via Postgres job_events table
+    1. Load compiled spec from Postgres
+    2. Build LiteLLM client (optional -- Phase 0 works without it)
+    3. Run the LangGraph generation pipeline
+    4. Stream all events to:
+       a. Postgres job_events  (persistence / Path A replay)
+       b. Redis pub/sub job:{job_id}  (Path B real-time)
+    5. Publish terminal signal ("complete" | "error") to Redis
+    6. Update jobs table with final status
 
 Wiring:
-    - LLM client: LiteLLM proxy at http://litellm:4000 (routes to Ollama)
-    - Retrieval: RetrievalService at http://retrieval:8001
-    - Gate: MetacognitionGate (zero LLM, always runs first)
-    - Generation graph: run_generation_job() from agents/graphs/generation_graph.py
+    - LLM:   LiteLLM proxy at LITELLM_BASE_URL  (optional)
+    - Graph: run_generation_job() from agents/graphs/generation_graph.py
 """
-
 from __future__ import annotations
 
 import json
 import logging
 import os
-import sys
-import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Optional
+from uuid import uuid4
 
-import asyncpg
-import httpx
+from agents.graphs.generation_graph import (
+    JobEvent,
+    JobStatus,
+    run_generation_job,
+)
 
 logger = logging.getLogger(__name__)
 
-# ── Path setup — agents/ must be importable from the worker container ──────────
-# The worker mounts /app/worker as /app, and project root as /project
-# agents/ is at /project/agents/
-AGENTS_ROOT = Path(os.getenv("AGENTS_ROOT", "/project"))
-for p in [str(AGENTS_ROOT), str(AGENTS_ROOT / "agents"), str(AGENTS_ROOT / "core")]:
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
-# ── Environment ────────────────────────────────────────────────────────────────
-DATABASE_URL      = os.getenv("DATABASE_URL", "postgresql://vibeforge:vibeforge_dev_secret@postgres:5432/vibeforge")
-LITELLM_BASE_URL  = os.getenv("LITELLM_BASE_URL", "http://litellm:4000")
-RETRIEVAL_URL     = os.getenv("RETRIEVAL_URL", "http://retrieval:8001")
-PACK_DIR          = os.getenv("PACK_DIR", str(AGENTS_ROOT / "packs" / "ecommerce"))
+# -- DB helper -----------------------------------------------------------------
 
-
-# ── Retrieval function — calls the Retrieval Service HTTP endpoint ─────────────
-
-async def retrieval_fn_factory(tenant_id: str):
-    """
-    Returns an async retrieval function scoped to this tenant.
-    The Domain Wizard passes this to the MetacognitionGate.
-    Contract C8: tenant_id is always sent.
-    """
-    async def _retrieve(query: str) -> list[str]:
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(
-                    f"{RETRIEVAL_URL}/retrieve",
-                    json={"query": query, "tenant_id": tenant_id, "top_k": 5},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                return [chunk["text"] for chunk in data.get("chunks", [])]
-        except Exception as e:
-            logger.warning("[Worker] Retrieval failed: %s — proceeding without RAG", e)
-            return []
-    return _retrieve
-
-
-# ── Job event writer ───────────────────────────────────────────────────────────
-
-async def write_event(
-    conn: asyncpg.Connection,
+async def _write_event(
+    conn,
     job_id: str,
-    phase: str,
-    status: str,
-    data: dict,
-    tenant_id: str = "00000000-0000-0000-0000-000000000001",
+    tenant_id: str,
+    event: JobEvent,
 ) -> None:
-    """Write one progress event to job_events table."""
+    """Persist one JobEvent to the job_events table."""
+    await conn.execute(
+        """
+        INSERT INTO job_events
+            (event_id, job_id, tenant_id, event_type, payload, created_at)
+        VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+        ON CONFLICT (event_id) DO NOTHING
+        """,
+        getattr(event, "event_id", None) or str(uuid4()),
+        job_id,
+        tenant_id,
+        event.phase.value,
+        json.dumps(event.payload),
+        getattr(event, "ts", None) or datetime.now(timezone.utc).isoformat(),
+    )
+
+
+async def _publish_event(redis, job_id: str, event: JobEvent) -> None:
+    """Publish one JobEvent to the Redis pub/sub channel for this job."""
+    msg = json.dumps({
+        "event_type": event.phase.value,
+        "job_id":     job_id,
+        "node":       event.node,
+        "phase":      event.phase.value,
+        "payload":    event.payload,
+        "ts":         getattr(event, "ts", ""),
+    })
+    await redis.publish(f"job:{job_id}", msg)
+
+
+# -- LLM client factory -------------------------------------------------------
+
+def _build_llm_client() -> Optional[Any]:
+    """
+    Build a LiteLLMClient if LITELLM_BASE_URL is configured.
+    Returns None in Phase 0 / test environments.
+    """
+    base_url = os.environ.get("LITELLM_BASE_URL", "")
+    api_key  = os.environ.get("LITELLM_API_KEY", "")
+    if not base_url:
+        logger.info("[generate_spec] LITELLM_BASE_URL not set -- Phase 0 stub mode")
+        return None
     try:
-        event_type = f"{phase}:{status}"
+        from agents.llm.litellm_client import LiteLLMClient
+        return LiteLLMClient(base_url=base_url, api_key=api_key)
+    except ImportError:
+        logger.warning("[generate_spec] LiteLLMClient not importable -- Phase 0 stub mode")
+        return None
+
+
+# -- Arq task -----------------------------------------------------------------
+
+async def generate_spec(
+    ctx: dict,
+    *,
+    job_id: str,
+    tenant_id: str,
+    spec_id: str,
+) -> dict[str, str]:
+    """
+    Arq worker task: run the full generation pipeline for one job.
+
+    ctx["redis"] -- shared aioredis connection from the worker pool
+    """
+    import asyncpg
+
+    postgres_dsn: str = os.environ.get("DATABASE_URL", "")
+    redis = ctx.get("redis")
+
+    logger.info(
+        "[generate_spec] starting  job=%s  spec=%s  tenant=%s",
+        job_id, spec_id, tenant_id,
+    )
+
+    conn = await asyncpg.connect(postgres_dsn)
+    try:
+        # 1. Mark job as running
         await conn.execute(
-            """
-            INSERT INTO job_events (tenant_id, job_id, event_type, payload, created_at)
-            VALUES ($1, $2, $3, $4::jsonb, NOW())
-            """,
-            tenant_id, job_id, event_type, json.dumps(data),
+            "UPDATE jobs SET status = 'running', started_at = NOW() WHERE id = $1",
+            job_id,
         )
-    except Exception as e:
-        logger.warning("[Worker] Could not write event: %s", e)
 
+        # 2. Load compiled spec
+        spec_row = await conn.fetchrow(
+            "SELECT compiled_spec FROM specs WHERE id = $1 AND tenant_id = $2",
+            spec_id, tenant_id,
+        )
+        if not spec_row:
+            raise ValueError(f"Spec {spec_id!r} not found for tenant {tenant_id!r}")
 
-async def update_job_status(
-    conn: asyncpg.Connection,
-    job_id: str,
-    status: str,
-    result: Optional[dict] = None,
-    error: Optional[str] = None,
-) -> None:
-    """Update the job status in the jobs table."""
-    try:
+        raw = spec_row["compiled_spec"]
+        spec_data: dict = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        stack_profile: str = spec_data.get("stack", {}).get("backend", "java_spring")
+
+        # 3. Build LLM client
+        llm_client = _build_llm_client()
+
+        # 4. Run pipeline
+        final_state = await run_generation_job(
+            job_id=job_id,
+            tenant_id=tenant_id,
+            postgres_dsn=postgres_dsn,
+            llm_client=llm_client,
+            spec_snapshot=spec_data,
+            stack_profile=stack_profile,
+        )
+
+        # 5. Stream events -> Postgres + Redis
+        for raw_event in final_state.events:
+            event = raw_event if isinstance(raw_event, JobEvent) else JobEvent(raw_event)
+            await _write_event(conn, job_id, tenant_id, event)
+            if redis:
+                await _publish_event(redis, job_id, event)
+
+        # 6. Publish terminal signal
+        delivered     = final_state.job_status == JobStatus.DELIVERED
+        terminal_type = "complete" if delivered else "error"
+        if redis:
+            await redis.publish(
+                f"job:{job_id}",
+                json.dumps({
+                    "event_type":  terminal_type,
+                    "job_id":      job_id,
+                    "status":      final_state.job_status.value,
+                    "preview_url": final_state.preview_url or "",
+                    "gitea_url":   final_state.gitea_repo_url or "",
+                }),
+            )
+
+        # 7. Update jobs table
+        db_status = "completed" if delivered else final_state.job_status.value
         await conn.execute(
             """
             UPDATE jobs
-            SET status = $1,
-                result_ref   = $2,
-                error_detail = $3::jsonb,
-                finished_at  = CASE WHEN $1 IN ('completed', 'failed') THEN NOW() ELSE NULL END,
-                started_at   = CASE WHEN $1 = 'running' AND started_at IS NULL THEN NOW() ELSE started_at END
-            WHERE id = $4
+               SET status         = $1,
+                   completed_at   = NOW(),
+                   preview_url    = $2,
+                   gitea_repo_url = $3
+             WHERE id = $4
             """,
-            status,
-            json.dumps(result) if result else None,
-            json.dumps({"error": error}) if error else None,
+            db_status,
+            final_state.preview_url,
+            final_state.gitea_repo_url,
             job_id,
         )
-    except Exception as e:
-        logger.warning("[Worker] Could not update job status: %s", e)
 
-
-# ── Main generation task ───────────────────────────────────────────────────────
-
-async def run_generation(ctx, job_id: str, tenant_id: str, spec_data: dict) -> dict:
-    """
-    Arq task: runs the full generation pipeline for one job.
-
-    Args:
-        ctx:        Arq context (contains redis connection)
-        job_id:     UUID of the job
-        tenant_id:  Tenant that owns this job
-        spec_data:  The compiled ApplicationSpec as a dict
-
-    Returns:
-        dict with status and any result data
-    """
-    logger.info("[Worker] Starting job %s for tenant %s", job_id, tenant_id)
-
-    # Connect to Postgres for event streaming
-    conn = await asyncpg.connect(DATABASE_URL)
-    try:
-        await update_job_status(conn, job_id, "running")
-        await write_event(conn, job_id, "startup", "started", {
-            "message": "Generation job started",
-            "job_id": job_id,
-                                    }, tenant_id)
-
-        # ── Step 1: Import agents ─────────────────────────────────────────────
-        try:
-            from agents.llm_client import make_llm_client, LiteLLMClient
-            from agents.gates.metacognition import MetacognitionGate
-            from agents.conversation.completeness_validator import CompletenessValidator
-            from agents.conversation.domain_wizard import DomainWizard, WizardTurnContext
-            from agents.graphs.generation_graph import run_generation_job
-            from agents.option_graph.engine import OptionGraphEngine
-
-            await write_event(conn, job_id, "startup", "agents_loaded", {
-                "message": "All agents loaded successfully",
-                                                    }, tenant_id)
-        except ImportError as e:
-            error_msg = f"Could not import agents: {e}"
-            logger.error("[Worker] %s", error_msg)
-            await write_event(conn, job_id, "startup", "failed", {"error": error_msg}, tenant_id)
-            await update_job_status(conn, job_id, "failed", error=error_msg)
-            return {"status": "failed", "error": error_msg}
-
-        # ── Step 2: Build LLM client (LiteLLM proxy → Ollama → Qwen3-8B) ─────
-        llm_client = LiteLLMClient(
-            base_url=LITELLM_BASE_URL,
-            api_key=os.getenv("LITELLM_MASTER_KEY", "vibeforge"),
+        logger.info(
+            "[generate_spec] done  job=%s  status=%s  events=%d",
+            job_id, db_status, len(final_state.events),
         )
+        return {"job_id": job_id, "status": db_status}
 
-        await write_event(conn, job_id, "startup", "llm_ready", {
-            "message": f"LLM client wired to {LITELLM_BASE_URL}",
-            "model": "agent-model → qwen3:8b via Ollama",
-                                    }, tenant_id)
-
-        # ── Step 3: Run Completeness Validator Layer 1 (zero LLM) ────────────
-        await write_event(conn, job_id, "validation", "started", {
-            "message": "Running completeness checks",
-                                    }, tenant_id)
-
-        validator = CompletenessValidator(llm_client=llm_client)
-        layer1_result = validator.validate_sync(spec_data)
-
-        if not layer1_result.can_proceed_to_review:
-            error_msg = f"Spec incomplete: {layer1_result.missing_required}"
-            await write_event(conn, job_id, "validation", "failed", {
-                "message": "Spec failed completeness checks",
-                "missing": layer1_result.missing_required,
-                "completeness_pct": layer1_result.completeness_percent,
-                                                    }, tenant_id)
-            await update_job_status(conn, job_id, "failed", error=error_msg)
-            return {"status": "failed", "error": error_msg, "missing": layer1_result.missing_required}
-
-        await write_event(conn, job_id, "validation", "passed", {
-            "message": "Spec passed all completeness checks",
-            "completeness_pct": layer1_result.completeness_percent,
-                                    }, tenant_id)
-
-        # ── Step 4: Run Completeness Validator Layer 2 (Qwen3-8B gap analysis)
-        await write_event(conn, job_id, "gap_analysis", "started", {
-            "message": "Running gap analysis with Qwen3-8B",
-                                    }, tenant_id)
-
+    except Exception as exc:
+        logger.error(
+            "[generate_spec] FAILED  job=%s  error=%s",
+            job_id, exc, exc_info=True,
+        )
         try:
-            full_result = await validator.validate(spec_data, run_gap_analysis=True)
-            gap_questions = [
-                {
-                    "question_id": gq.question_id,
-                    "question": gq.question,
-                    "choice_chips": gq.choice_chips,
-                    "priority": gq.priority,
-                }
-                for gq in full_result.gap_questions
-            ]
-            await write_event(conn, job_id, "gap_analysis", "complete", {
-                "message": f"Found {len(gap_questions)} gap questions",
-                "gap_questions": gap_questions,
-                                                    }, tenant_id)
-        except Exception as e:
-            logger.warning("[Worker] Gap analysis failed: %s — continuing", e)
-            await write_event(conn, job_id, "gap_analysis", "skipped", {
-                "message": f"Gap analysis skipped: {e}",
-                                                    }, tenant_id)
-            gap_questions = []
-
-        # ── Step 5: Build spec object for the generation graph ────────────────
-        await write_event(conn, job_id, "planning", "started", {
-            "message": "Building spec for generation pipeline",
-                                    }, tenant_id)
-
-        # Extract entity names for the planner
-        entity_names = [
-            e.get("name", "") for e in
-            spec_data.get("domain_model", {}).get("entities", [])
-        ]
-
-        # ── Step 6: Run the LangGraph generation pipeline ─────────────────────
-        await write_event(conn, job_id, "generation", "started", {
-            "message": "Starting LangGraph generation pipeline",
-            "entities": entity_names,
-            "module_count_estimate": len(entity_names) * 3 + 1,
-                                    }, tenant_id)
-
-        try:
-            final_state = await run_generation_job(
-                job_id=job_id,
-                tenant_id=tenant_id,
-                spec_entity_names=entity_names,
-                postgres_dsn=DATABASE_URL,
+            await conn.execute(
+                """
+                UPDATE jobs
+                   SET status        = 'failed',
+                       completed_at  = NOW(),
+                       error_message = $1
+                 WHERE id = $2
+                """,
+                str(exc), job_id,
             )
-
-            # Stream the generation events from the graph state
-            for event in getattr(final_state, "events", []):
-                await write_event(
-                    conn, job_id,
-                    getattr(event, "phase", "generation"),
-                    getattr(event, "node", "unknown"),
-                    getattr(event, "data", {}),
+            if redis:
+                await redis.publish(
+                    f"job:{job_id}",
+                    json.dumps({
+                        "event_type": "error",
+                        "job_id":     job_id,
+                        "error":      str(exc),
+                    }),
                 )
-
-            await write_event(conn, job_id, "generation", "complete", {
-                "message": "Generation pipeline complete",
-                "fix_iterations": getattr(final_state, "fix_count", 0),
-                "file_count": len(getattr(final_state, "assembled_files", {})),
-                                                    }, tenant_id)
-
-        except Exception as e:
-            logger.error("[Worker] Generation pipeline failed: %s", e)
-            await write_event(conn, job_id, "generation", "failed", {
-                "message": f"Generation failed: {str(e)[:200]}",
-                                                    }, tenant_id)
-            await update_job_status(conn, job_id, "failed", error=str(e)[:500])
-            return {"status": "failed", "error": str(e)}
-
-        # ── Step 7: Mark job complete ─────────────────────────────────────────
-        result = {
-            "gap_questions": gap_questions,
-            "entity_count": len(entity_names),
-            "completeness_pct": layer1_result.completeness_percent,
-        }
-        await update_job_status(conn, job_id, "completed", result=result)
-        await write_event(conn, job_id, "delivery", "complete", {
-            "message": "Job completed successfully",
-            "result": result,
-                                    }, tenant_id)
-
-        logger.info("[Worker] Job %s completed successfully", job_id)
-        return {"status": "completed", "result": result}
-
-    except Exception as e:
-        logger.error("[Worker] Unexpected error in job %s: %s", job_id, e)
-        try:
-            await update_job_status(conn, job_id, "failed", error=str(e)[:500])
         except Exception:
             pass
-        return {"status": "failed", "error": str(e)}
+        raise
 
-    finally:
-        await conn.close()
-
-
-# ── Spec Sheet validation task (lightweight — no generation) ───────────────────
-
-async def validate_spec(ctx, job_id: str, tenant_id: str, spec_data: dict) -> dict:
-    """
-    Arq task: validates a spec and returns gap questions.
-    Called when user clicks "Check completeness" without triggering generation.
-    """
-    logger.info("[Worker] Validating spec for job %s", job_id)
-
-    conn = await asyncpg.connect(DATABASE_URL)
-    try:
-        from agents.llm_client import LiteLLMClient
-        from agents.conversation.completeness_validator import CompletenessValidator
-
-        llm_client = LiteLLMClient(
-            base_url=LITELLM_BASE_URL,
-            api_key=os.getenv("LITELLM_MASTER_KEY", "vibeforge"),
-        )
-
-        validator = CompletenessValidator(llm_client=llm_client)
-        result = await validator.validate(spec_data, run_gap_analysis=True)
-
-        return {
-            "status": "ok",
-            "is_complete": result.is_complete,
-            "completeness_pct": result.completeness_percent,
-            "missing_required": result.missing_required,
-            "gap_questions": [
-                {
-                    "question_id": gq.question_id,
-                    "question": gq.question,
-                    "choice_chips": gq.choice_chips,
-                    "priority": gq.priority,
-                }
-                for gq in result.gap_questions
-            ],
-        }
-    except Exception as e:
-        logger.error("[Worker] Validation failed: %s", e)
-        return {"status": "error", "error": str(e)}
     finally:
         await conn.close()

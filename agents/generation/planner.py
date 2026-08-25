@@ -141,9 +141,10 @@ class PlannerAgent:
             )
             # Enforce sequential mode always
             output.synthesis_mode = "sequential"
-            output.total_modules = len(output.modules)
+            output.total_modules  = len(output.modules)
 
-            # Validate: no circular dependencies
+            # Validate: no circular dependencies, no duplicate build_order,
+            # all dependency IDs exist. _validate_dag raises ValueError on failure.
             self._validate_dag(output.modules)
 
             logger.info(
@@ -152,8 +153,12 @@ class PlannerAgent:
             )
             return output
 
-        except HarnessError as e:
-            logger.error("[Planner] Harness failed: %s — falling back to deterministic plan", e)
+        # FIX: also catch ValueError raised by _validate_dag.
+        # Previously only HarnessError was caught, so an invalid DAG from the LLM
+        # (duplicate build_order, unknown dependency, wrong ordering) would propagate
+        # uncaught and crash the pipeline instead of triggering the safe fallback.
+        except (HarnessError, ValueError) as e:
+            logger.error("[Planner] Failed: %s — falling back to deterministic plan", e)
             return self._deterministic_fallback(spec_dict)
 
     # ── Prompt builder ────────────────────────────────────────────────────────
@@ -163,7 +168,7 @@ class PlannerAgent:
             e["name"] for e in
             spec.get("domain_model", {}).get("entities", [])
         ]
-        endpoints = spec.get("api_model", {}).get("endpoints", [])
+        endpoints    = spec.get("api_model", {}).get("endpoints", [])
         integrations = [
             i.get("name", "") for i in
             spec.get("integration_model", {}).get("integrations", [])
@@ -171,16 +176,16 @@ class PlannerAgent:
         workflows = spec.get("workflow_model", {}).get("state_machines", [])
 
         summary = {
-            "vertical": spec.get("vertical", ""),
-            "stack_profile": stack_profile,
-            "entities": entities,
-            "endpoint_count": len(endpoints),
-            "endpoint_paths": [e.get("path", "") for e in endpoints[:10]],
-            "integrations": integrations,
-            "has_state_machines": len(workflows) > 0,
-            "state_machine_names": [w.get("name", "") for w in workflows],
+            "vertical":              spec.get("vertical", ""),
+            "stack_profile":         stack_profile,
+            "entities":              entities,
+            "endpoint_count":        len(endpoints),
+            "endpoint_paths":        [e.get("path", "") for e in endpoints[:10]],
+            "integrations":          integrations,
+            "has_state_machines":    len(workflows) > 0,
+            "state_machine_names":   [w.get("name", "") for w in workflows],
             "compliance_frameworks": spec.get("compliance_model", {}).get("frameworks", []),
-            "security_roles": [
+            "security_roles":        [
                 r.get("name") for r in
                 spec.get("security_model", {}).get("roles", [])
             ],
@@ -211,8 +216,11 @@ class PlannerAgent:
         1. No two modules share the same build_order
         2. All dependency module_ids exist in the plan
         3. No dependency has a higher build_order than the module that needs it
+
+        Raises ValueError on any violation — caught by plan() which falls back
+        to _deterministic_fallback().
         """
-        order_map = {m.module_id: m.build_order for m in modules}
+        order_map: dict[str, int] = {m.module_id: m.build_order for m in modules}
         seen_orders: set[int] = set()
 
         for m in modules:
@@ -238,8 +246,9 @@ class PlannerAgent:
     @staticmethod
     def _deterministic_fallback(spec: dict[str, Any]) -> ModulePlanOutput:
         """
-        If Qwen3-8B fails all harness attempts, fall back to the deterministic
-        Phase 0 plan. Guarantees the pipeline always has a module plan.
+        If Qwen3-8B fails all harness attempts (or produces an invalid DAG),
+        fall back to the deterministic Phase 0 plan.
+        Guarantees the pipeline always has a module plan.
         """
         entities = [
             e["name"] for e in

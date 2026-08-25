@@ -1,0 +1,34 @@
+name: logistics
+version: "1.0.0"
+display_name: Logistics
+vertical: logistics
+
+description: >
+  Logistics domain pack supporting shipment,
+  routing, warehouse and carrier operations.
+
+sections:
+  - shipments
+  - routing
+  - warehouse
+  - carriers
+
+option_graph: option_graphs/logistics.yaml
+
+schema_fragments:
+  - schema_fragments/shipment.yaml
+  - schema_fragments/route.yaml
+  - schema_fragments/warehouse.yaml
+
+workflow_templates:
+  - workflow_templates/dispatch.yaml
+  - workflow_templates/delivery.yaml
+
+compliance_rules:
+  - compliance_rules/logistics.yaml
+
+connectors:
+  - connectors/carriers.yaml
+
+acceptance_seeds:
+  - acceptance_seeds/logistics.feature

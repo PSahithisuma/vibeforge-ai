@@ -145,3 +145,31 @@ class GherkinAcceptanceRunner:
             compliance_score=score,
             scenarios=scenario_results,
         )
+
+
+BANKING_FEATURE = """
+Feature: Banking Core Payment and Compliance
+  Scenario: Transfer funds between accounts with ACID compliance
+    Given customer has an active savings account
+    When transfer of amount is requested
+    Then transaction is executed atomically
+    And audit trail is logged
+
+  Scenario: Prevent negative balance transfers
+    Given account with balance 100
+    When transfer of 500 is requested
+    Then validation fails with insufficient funds
+
+  Scenario: High value transaction requires KYC
+    Given customer initiates transaction above 50000
+    When transaction is processed
+    Then KYC verification is enforced
+"""
+
+LOGISTICS_FEATURE = """
+Feature: Freight and Waybill Tracking
+  Scenario: Create and track shipment waybill
+    Given a new delivery request
+    When waybill is generated
+    Then tracking status is updated
+"""

@@ -1,33 +1,15 @@
 """
-VibeForge — Post-QA Semantic Cache (Phase 3)
-=============================================
+VibeForge — Post-QA Semantic Cache (Phase 3 / Phase 5 Hardening)
+===============================================================
 Cache key = canonical Spec IR hash + stack_profile + scaffold_version + ruleset_version.
-Written ONLY after full gate pass. Never silently substituted — near-hits are
-suggested to the user, who decides whether to accept. Contract C7.
+Written ONLY after full gate pass (Contract C9). Never silently substituted — near-hits
+are suggested to the user, who decides whether to accept.
 
-How it works:
-  1. Before generation: compute cache key from frozen spec
-  2. Lookup in cache (exact match first, then near-hits by vector similarity)
-  3. If exact hit: return cached artifact bundle URL (skip generation entirely)
-  4. If near-hit: suggest to user — "A similar spec was generated 3 days ago,
-     would you like to start from that output?" — user decides
-  5. After gate pass: write to cache (cache miss path only)
-
-Cache key components:
-  - canonical_hash:    SHA-256 of the normalized frozen spec (from Spec IR freeze())
-  - stack_profile:     java_spring | python_fastapi | dotnet
-  - scaffold_version:  version tag of the Copier scaffold template
-  - ruleset_version:   version tag of the compliance ruleset in use
-
-Why volatile fields are excluded from the key:
-  Two specs with different job_ids/timestamps but identical content should
-  hit the same cache entry. The canonical_hash already normalizes these out
-  (see core/spec_ir.py freeze() implementation).
-
-Contract C7:
-  Cache write happens ONLY here, ONLY after full gate pass.
-  No other code path writes to the cache.
-  Near-hits are SUGGESTED, never silently substituted.
+Hardening Rules (Phase 5):
+  1. Gate-pass-only enforcement: writing failed gate results raises ValueError.
+  2. Tenant-scoped TTL: entries expire after a configurable duration (default: 7 days).
+  3. Multi-tenant privacy: Tenant B cannot read Tenant A's private cache.
+  4. Auto-promotion: Entries with >= 3 reuses are promoted to shared global cache.
 """
 
 from __future__ import annotations
@@ -36,7 +18,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -80,7 +62,7 @@ class CacheKey:
 class CacheEntry:
     """
     One cached generation result.
-    Written only after full gate pass (Contract C7).
+    Written only after full gate pass (Contract C9).
     """
     entry_id: str = field(default_factory=lambda: str(uuid4()))
     cache_key_hash: str = ""            # CacheKey.compute()
@@ -97,20 +79,33 @@ class CacheEntry:
     endpoint_count: int = 0
     stack_profile: str = ""
 
-    # Provenance
+    # Provenance & Isolation
     job_id: str = ""
     tenant_id: str = ""
+    shared: bool = False                # True if promoted to global shared cache
     gate_passed_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
+    expires_at: Optional[str] = None    # ISO timestamp for TTL expiration
 
     # Usage stats
     hit_count: int = 0
     last_hit_at: Optional[str] = None
 
-    # Embedding for near-hit search (stored externally in Qdrant)
-    embedding_text: str = ""            # text used for embedding
+    # Embedding for near-hit search
+    embedding_text: str = ""
     embedding: Optional[list[float]] = None
+
+    def is_expired(self, now: Optional[datetime] = None) -> bool:
+        """Checks whether the cache entry has exceeded its TTL."""
+        if not self.expires_at:
+            return False
+        current_time = now or datetime.now(timezone.utc)
+        try:
+            exp = datetime.fromisoformat(self.expires_at)
+            return current_time >= exp
+        except Exception:
+            return False
 
 
 @dataclass
@@ -129,13 +124,12 @@ class CacheHit:
         return self.hit_type == "near"
 
 
-# ── In-memory cache store (for tests) ─────────────────────────────────────────
+# ── In-memory cache store (for tests & local use) ─────────────────────────────
 
 class InMemoryCacheStore:
     """
     Test/offline replacement for the production cache backend.
-    Uses exact key matching only (no vector similarity without bge-m3).
-    In production: Postgres for exact keys + Qdrant for near-hit similarity.
+    Enforces TTL expiration, tenant isolation, and auto-promotion.
     """
 
     def __init__(self):
@@ -145,38 +139,55 @@ class InMemoryCacheStore:
         key_hash = key.compute()
         entry.cache_key_hash = key_hash
         self._entries[key_hash] = entry
-        logger.info(
-            "[SemanticCache] Written: key=%s entry=%s",
-            str(key), entry.entry_id,
-        )
+        logger.info("[SemanticCache] Written: key=%s entry=%s", str(key), entry.entry_id)
 
-    def lookup_exact(self, key: CacheKey) -> Optional[CacheEntry]:
+    def lookup_exact(self, key: CacheKey, tenant_id: str = "") -> Optional[CacheEntry]:
         key_hash = key.compute()
         entry = self._entries.get(key_hash)
-        if entry:
-            entry.hit_count += 1
-            entry.last_hit_at = datetime.now(timezone.utc).isoformat()
-            logger.info(
-                "[SemanticCache] EXACT HIT: key=%s hits=%d",
-                str(key), entry.hit_count,
-            )
+        if not entry:
+            return None
+
+        # Check TTL expiration
+        if entry.is_expired():
+            logger.info("[SemanticCache] Evicting expired entry: %s", key_hash)
+            del self._entries[key_hash]
+            return None
+
+        # Check Tenant Scoping
+        if tenant_id and not entry.shared and entry.tenant_id != tenant_id:
+            logger.info("[SemanticCache] Tenant mismatch (private entry) for key=%s", key_hash)
+            return None
+
+        entry.hit_count += 1
+        entry.last_hit_at = datetime.now(timezone.utc).isoformat()
+
+        # Contract C14 / C9: Auto-promote after 3 reuses
+        if entry.hit_count >= 3 and not entry.shared:
+            entry.shared = True
+            logger.info("[SemanticCache] Auto-promoted entry to shared global: %s", entry.entry_id)
+
         return entry
 
     def lookup_near(
         self,
         key: CacheKey,
+        tenant_id: str = "",
         min_similarity: float = 0.92,
         top_k: int = 3,
     ) -> list[CacheHit]:
-        """
-        In the in-memory store, near-hit uses simple field overlap.
-        In production Qdrant: bge-m3 embedding similarity.
-        """
         hits: list[CacheHit] = []
         query_text = self._key_to_embedding_text(key)
         query_tokens = set(query_text.lower().split())
 
-        for entry in self._entries.values():
+        expired_keys = []
+        for kh, entry in list(self._entries.items()):
+            if entry.is_expired():
+                expired_keys.append(kh)
+                continue
+
+            if tenant_id and not entry.shared and entry.tenant_id != tenant_id:
+                continue
+
             if not entry.embedding_text:
                 continue
             entry_tokens = set(entry.embedding_text.lower().split())
@@ -193,6 +204,10 @@ class InMemoryCacheStore:
                     similarity_score=similarity,
                 ))
 
+        # Evict expired entries
+        for kh in expired_keys:
+            del self._entries[kh]
+
         hits.sort(key=lambda h: h.similarity_score, reverse=True)
         return hits[:top_k]
 
@@ -206,6 +221,31 @@ class InMemoryCacheStore:
             return True
         return False
 
+    @staticmethod
+    def format_near_hit_suggestion(hit: CacheHit) -> dict[str, Any]:
+        """
+        Formats a near-hit suggestion for the user (Contract C7).
+        Near-hits are suggested, never silently auto-substituted.
+        """
+        score_pct = int(round(hit.similarity_score * 100))
+        return {
+            "type": "near_cache_hit",
+            "similarity_score": hit.similarity_score,
+            "similarity_pct": f"{score_pct}%",
+            "spec_summary": hit.entry.spec_summary,
+            "artifact_bundle_url": hit.entry.artifact_bundle_url,
+            "gitea_repo_url": hit.entry.gitea_repo_url,
+            "preview_url": hit.entry.preview_url,
+            "message": (
+                f"Found similar generated project ({score_pct}% match): "
+                f"'{hit.entry.spec_summary}'. Use as starting baseline?"
+            ),
+            "user_choices": [
+                "Use cached baseline and adapt",
+                "Generate fresh from scratch",
+            ],
+        }
+
     def stats(self) -> dict[str, Any]:
         return {
             "total_entries": len(self._entries),
@@ -217,69 +257,34 @@ class InMemoryCacheStore:
 
 class SemanticCache:
     """
-    Post-QA semantic cache. Contract C7: written only after full gate pass.
-
-    Usage in generation graph:
-
-    BEFORE generation:
-        cache = SemanticCache()
-        key = CacheKey(spec.canonical_hash, stack_profile, scaffold_ver, ruleset_ver)
-        hit = await cache.lookup(key)
-        if hit:
-            if hit.is_exact:
-                return hit.entry.artifact_bundle_url   # skip generation
-            else:
-                suggest_to_user(hit)   # user decides, never auto-substitute
-
-    AFTER gate passes:
-        await cache.write(
-            key=key,
-            artifact_bundle_url=delivery.minio_bundle_url,
-            gitea_repo_url=delivery.gitea_repo_url,
-            spec_summary=spec_summary,
-            job_id=job_id,
-            tenant_id=tenant_id,
-        )
+    Post-QA semantic cache with Phase 5 hardening (Contract C9).
     """
 
-    # Near-hit threshold — below this, don't suggest the cached result
     NEAR_HIT_THRESHOLD = 0.92
+    DEFAULT_TTL_SECONDS = 604800  # 7 days
 
-    def __init__(self, store=None):
+    def __init__(self, store=None, default_ttl_seconds: int = DEFAULT_TTL_SECONDS):
         self._store = store or InMemoryCacheStore()
+        self._default_ttl_seconds = default_ttl_seconds
 
     async def lookup(
         self,
         key: CacheKey,
         tenant_id: str = "",
     ) -> Optional[CacheHit]:
-        """
-        Look up the cache. Returns the best hit or None.
-
-        Priority:
-        1. Exact match → return immediately (skip generation)
-        2. Near match (similarity ≥ 0.92) → suggest to user
-        3. No match → return None (proceed with generation)
-        """
-        # Exact lookup
-        exact = self._store.lookup_exact(key)
+        exact = self._store.lookup_exact(key, tenant_id=tenant_id)
         if exact:
             return CacheHit(entry=exact, hit_type="exact", similarity_score=1.0)
 
-        # Near-hit lookup
         near_hits = self._store.lookup_near(
             key=key,
+            tenant_id=tenant_id,
             min_similarity=self.NEAR_HIT_THRESHOLD,
             top_k=1,
         )
         if near_hits:
-            logger.info(
-                "[SemanticCache] NEAR HIT: score=%.3f — will suggest to user",
-                near_hits[0].similarity_score,
-            )
             return near_hits[0]
 
-        logger.info("[SemanticCache] MISS: %s", str(key))
         return None
 
     async def write(
@@ -294,22 +299,22 @@ class SemanticCache:
         entity_count: int = 0,
         endpoint_count: int = 0,
         preview_url: str = "",
+        gate_passed: bool = True,
+        ttl_seconds: Optional[int] = None,
     ) -> CacheEntry:
         """
         Write to cache after full gate pass.
-        CONTRACT C7: this is the ONLY place cache writes happen.
-
-        Args:
-            key:                  CacheKey for this generation
-            artifact_bundle_url:  MinIO URL to the complete zip bundle
-            gitea_repo_url:       Gitea repo URL
-            spec_summary:         Human-readable description for near-hit UI
-            job_id:               Source job
-            tenant_id:            Tenant that owns this artifact
-
-        Returns:
-            The written CacheEntry
+        CONTRACT C9: gate_passed must be True.
         """
+        if not gate_passed:
+            raise ValueError("Contract C9 Violation: Cannot write failed gate builds to semantic cache.")
+
+        ttl = ttl_seconds if ttl_seconds is not None else self._default_ttl_seconds
+        expires_at = (
+            (datetime.now(timezone.utc) + timedelta(seconds=ttl)).isoformat()
+            if ttl > 0 else None
+        )
+
         embedding_text = self._build_embedding_text(
             key=key,
             spec_summary=spec_summary,
@@ -329,28 +334,41 @@ class SemanticCache:
             stack_profile=key.stack_profile,
             job_id=job_id,
             tenant_id=tenant_id,
+            expires_at=expires_at,
             embedding_text=embedding_text,
         )
 
         self._store.write(key, entry)
-
-        logger.info(
-            "[SemanticCache] WRITE: key=%s job=%s bundle=%s",
-            str(key), job_id, artifact_bundle_url[:60],
-        )
         return entry
 
     async def invalidate(self, key: CacheKey) -> bool:
-        """
-        Invalidate a cache entry.
-        Called when: scaffold version bumped, ruleset version bumped,
-        or tenant requests cache bust.
-        """
         key_hash = key.compute()
-        result = self._store.invalidate(key_hash)
-        if result:
-            logger.info("[SemanticCache] Invalidated: %s", str(key))
-        return result
+        return self._store.invalidate(key_hash)
+
+    @staticmethod
+    def format_near_hit_suggestion(hit: CacheHit) -> dict[str, Any]:
+        """
+        Formats a near-hit suggestion for the user (Contract C7).
+        Near-hits are suggested, never silently auto-substituted.
+        """
+        score_pct = int(round(hit.similarity_score * 100))
+        return {
+            "type": "near_cache_hit",
+            "similarity_score": hit.similarity_score,
+            "similarity_pct": f"{score_pct}%",
+            "spec_summary": hit.entry.spec_summary,
+            "artifact_bundle_url": hit.entry.artifact_bundle_url,
+            "gitea_repo_url": hit.entry.gitea_repo_url,
+            "preview_url": hit.entry.preview_url,
+            "message": (
+                f"Found similar generated project ({score_pct}% match): "
+                f"'{hit.entry.spec_summary}'. Use as starting baseline?"
+            ),
+            "user_choices": [
+                "Use cached baseline and adapt",
+                "Generate fresh from scratch",
+            ],
+        }
 
     def stats(self) -> dict[str, Any]:
         return self._store.stats()
@@ -362,10 +380,6 @@ class SemanticCache:
         vertical: str,
         entity_count: int,
     ) -> str:
-        """
-        Build the text used for near-hit embedding.
-        Includes spec semantics, not just the key.
-        """
         parts = [
             f"vertical:{vertical}",
             f"stack:{key.stack_profile}",
@@ -384,34 +398,9 @@ class SemanticCache:
         scaffold_version: str = "1.0.0",
         ruleset_version: str = "1.0.0",
     ) -> CacheKey:
-        """
-        Convenience factory. Called by the generation graph before starting.
-        """
         return CacheKey(
             canonical_hash=canonical_hash,
             stack_profile=stack_profile,
             scaffold_version=scaffold_version,
             ruleset_version=ruleset_version,
         )
-
-    @staticmethod
-    def format_near_hit_suggestion(hit: CacheHit) -> dict[str, Any]:
-        """
-        Format a near-hit for display in the job console UI.
-        The user sees this and decides whether to use the cached output.
-        Contract C7: never auto-substitute.
-        """
-        return {
-            "type": "near_cache_hit",
-            "similarity_pct": round(hit.similarity_score * 100, 1),
-            "cached_spec_summary": hit.entry.spec_summary,
-            "cached_at": hit.entry.gate_passed_at,
-            "artifact_url": hit.entry.artifact_bundle_url,
-            "gitea_url": hit.entry.gitea_repo_url,
-            "message": (
-                f"A similar application was generated "
-                f"({round(hit.similarity_score * 100)}% match). "
-                "Would you like to start from that output instead of generating fresh?"
-            ),
-            "user_choices": ["Use cached output", "Generate fresh"],
-        }

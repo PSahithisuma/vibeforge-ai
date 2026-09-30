@@ -1,28 +1,408 @@
 entity:
+  name: Customer
+  description: Core banking customer with full KYC and risk profiling
+
+fields:
+  - name: customer_id
+    type: uuid
+    required: true
+    primary_key: true
+
+  - name: customer_ref
+    type: string
+    required: true
+    unique: true
+    description: CIF number - Customer Information File
+
+  - name: first_name
+    type: string
+    required: true
+    pii: sensitive
+
+  - name: last_name
+    type: string
+    required: true
+    pii: sensitive
+
+  - name: date_of_birth
+    type: date
+    required: true
+    pii: sensitive
+
+  - name: gender
+    type: enum
+    values: [MALE, FEMALE, OTHER]
+
+  - name: nationality
+    type: string
+    required: true
+
+  - name: mobile_number
+    type: string
+    required: true
+    pii: restricted
+
+  - name: email
+    type: string
+    required: true
+    pii: sensitive
+
+  - name: pan_number
+    type: string
+    pii: restricted
+    description: PAN card number - required for high value txns
+
+  - name: aadhaar_hash
+    type: string
+    pii: restricted
+    description: SHA-256 hash of Aadhaar - never store raw
+
+  - name: kyc_status
+    type: enum
+    values: [PENDING, BASIC, FULL, REJECTED, EXPIRED]
+    required: true
+
+  - name: kyc_verified_at
+    type: datetime
+
+  - name: kyc_verified_by
+    type: uuid
+    description: Staff member who verified KYC
+
+  - name: risk_category
+    type: enum
+    values: [LOW, MEDIUM, HIGH, PEP]
+    description: RBI risk categorization
+
+  - name: customer_segment
+    type: enum
+    values: [RETAIL, HNI, CORPORATE, NRI]
+
+  - name: is_active
+    type: boolean
+    required: true
+    default: true
+
+  - name: onboarded_at
+    type: datetime
+    required: true
+
+  - name: branch_id
+    type: uuid
+    required: true
+    foreign_key: Branch.branch_id
+
+  - name: relationship_manager_id
+    type: uuid
+    foreign_key: Staff.staff_id
+
+  - name: created_at
+    type: datetime
+    required: true
+
+  - name: updated_at
+    type: datetime
+    required: true
+
+  - name: created_by
+    type: uuid
+    required: true
+
+---
+entity:
   name: Account
+  description: Bank account with full RBI-compliant structure
 
 fields:
   - name: account_id
     type: uuid
     required: true
+    primary_key: true
+
+  - name: account_number
+    type: string
+    required: true
+    unique: true
+    description: 16-digit IBAN-style account number
 
   - name: customer_id
     type: uuid
     required: true
+    foreign_key: Customer.customer_id
+
+  - name: branch_id
+    type: uuid
+    required: true
+    foreign_key: Branch.branch_id
+
+  - name: product_id
+    type: uuid
+    required: true
+    foreign_key: Product.product_id
 
   - name: account_type
     type: enum
-    values:
-      - SAVINGS
-      - CURRENT
+    values: [SAVINGS, CURRENT, FIXED_DEPOSIT, RECURRING_DEPOSIT, NRE, NRO]
+    required: true
 
   - name: currency
     type: string
+    required: true
+    default: INR
 
   - name: status
     type: enum
-    values:
-      - ACTIVE
-      - BLOCKED
-      - CLOSED
-      
+    values: [ACTIVE, DORMANT, FROZEN, BLOCKED, CLOSED, PENDING_CLOSURE]
+    required: true
+
+  - name: balance
+    type: decimal
+    required: true
+    precision: 18
+    scale: 2
+    description: Current ledger balance
+
+  - name: available_balance
+    type: decimal
+    required: true
+    precision: 18
+    scale: 2
+    description: Balance minus holds
+
+  - name: hold_amount
+    type: decimal
+    default: 0
+    description: Amount under lien or hold
+
+  - name: overdraft_limit
+    type: decimal
+    default: 0
+    description: Approved overdraft facility
+
+  - name: minimum_balance
+    type: decimal
+    description: Minimum balance required - MAB
+
+  - name: interest_rate
+    type: decimal
+    description: Current applicable interest rate
+
+  - name: interest_accrued
+    type: decimal
+    default: 0
+
+  - name: maturity_date
+    type: date
+    description: For FD and RD accounts
+
+  - name: nominee_id
+    type: uuid
+    foreign_key: Nominee.nominee_id
+
+  - name: ifsc_code
+    type: string
+    required: true
+
+  - name: micr_code
+    type: string
+
+  - name: last_transaction_at
+    type: datetime
+
+  - name: dormancy_trigger_at
+    type: datetime
+    description: When account becomes dormant per RBI 2-year rule
+
+  - name: closed_at
+    type: datetime
+
+  - name: closure_reason
+    type: string
+
+  - name: opened_at
+    type: datetime
+    required: true
+
+  - name: created_at
+    type: datetime
+    required: true
+
+  - name: updated_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: Branch
+  description: Bank branch master data
+
+fields:
+  - name: branch_id
+    type: uuid
+    required: true
+    primary_key: true
+
+  - name: ifsc_code
+    type: string
+    required: true
+    unique: true
+
+  - name: micr_code
+    type: string
+    unique: true
+
+  - name: branch_name
+    type: string
+    required: true
+
+  - name: address_line1
+    type: string
+    required: true
+
+  - name: address_line2
+    type: string
+
+  - name: city
+    type: string
+    required: true
+
+  - name: state
+    type: string
+    required: true
+
+  - name: pin_code
+    type: string
+    required: true
+
+  - name: phone
+    type: string
+
+  - name: email
+    type: string
+
+  - name: branch_manager_id
+    type: uuid
+
+  - name: is_active
+    type: boolean
+    required: true
+    default: true
+
+  - name: opening_time
+    type: string
+    description: HH:MM format
+
+  - name: closing_time
+    type: string
+
+  - name: created_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: Nominee
+  description: Account nominee details
+
+fields:
+  - name: nominee_id
+    type: uuid
+    required: true
+    primary_key: true
+
+  - name: account_id
+    type: uuid
+    required: true
+    foreign_key: Account.account_id
+
+  - name: name
+    type: string
+    required: true
+    pii: sensitive
+
+  - name: relationship
+    type: enum
+    values: [SPOUSE, CHILD, PARENT, SIBLING, OTHER]
+    required: true
+
+  - name: date_of_birth
+    type: date
+    pii: sensitive
+
+  - name: address
+    type: string
+    pii: sensitive
+
+  - name: share_percentage
+    type: decimal
+    default: 100
+
+  - name: is_minor
+    type: boolean
+    default: false
+
+  - name: guardian_name
+    type: string
+    description: Required if nominee is minor
+
+  - name: created_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: Product
+  description: Banking product master - defines account features and limits
+
+fields:
+  - name: product_id
+    type: uuid
+    required: true
+    primary_key: true
+
+  - name: product_code
+    type: string
+    required: true
+    unique: true
+
+  - name: product_name
+    type: string
+    required: true
+
+  - name: account_type
+    type: enum
+    values: [SAVINGS, CURRENT, FIXED_DEPOSIT, RECURRING_DEPOSIT]
+    required: true
+
+  - name: minimum_balance
+    type: decimal
+    default: 0
+
+  - name: interest_rate
+    type: decimal
+
+  - name: daily_txn_limit
+    type: decimal
+    description: RBI-mandated daily transaction limit
+
+  - name: monthly_txn_limit
+    type: decimal
+
+  - name: upi_limit_per_txn
+    type: decimal
+    description: Per-transaction UPI limit
+
+  - name: neft_limit_per_txn
+    type: decimal
+
+  - name: rtgs_minimum_amount
+    type: decimal
+    description: RTGS minimum is 2 lakhs per RBI
+
+  - name: is_active
+    type: boolean
+    default: true
+
+  - name: created_at
+    type: datetime
+    required: true

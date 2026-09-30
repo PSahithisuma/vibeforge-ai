@@ -1,35 +1,520 @@
 entity:
   name: Transaction
+  description: Master transaction ledger - every debit and credit
 
 fields:
   - name: transaction_id
     type: uuid
     required: true
+    primary_key: true
 
-  - name: account_id
-    type: uuid
+  - name: transaction_ref
+    type: string
     required: true
+    unique: true
+    description: Unique reference number shown to customer
+
+  - name: rrn
+    type: string
+    description: RRN - Retrieval Reference Number from payment network
+
+  - name: from_account_id
+    type: uuid
+    foreign_key: Account.account_id
+
+  - name: to_account_id
+    type: uuid
+    foreign_key: Account.account_id
+
+  - name: beneficiary_id
+    type: uuid
+    foreign_key: Beneficiary.beneficiary_id
 
   - name: amount
     type: decimal
     required: true
+    precision: 18
+    scale: 2
 
   - name: currency
     type: string
     required: true
+    default: INR
+
+  - name: exchange_rate
+    type: decimal
+    default: 1.0
+    description: For foreign currency transactions
+
+  - name: inr_equivalent
+    type: decimal
+    description: Amount in INR after exchange rate
+
+  - name: transaction_type
+    type: enum
+    values: [DEBIT, CREDIT, REVERSAL, REFUND, INTEREST, CHARGE, ADJUSTMENT]
+    required: true
 
   - name: payment_rail
     type: enum
-    values:
-      - UPI
-      - NEFT
-      - RTGS
-      - IMPS
+    values: [UPI, NEFT, RTGS, IMPS, INTERNAL, CASH, CHEQUE, DD]
+    required: true
+
+  - name: channel
+    type: enum
+    values: [MOBILE_APP, NET_BANKING, ATM, BRANCH, API, STANDING_INSTRUCTION]
+    required: true
 
   - name: status
     type: enum
-    values:
-      - INITIATED
-      - PROCESSING
-      - SUCCESS
-      - FAILED
+    values: [INITIATED, PENDING, PROCESSING, SUCCESS, FAILED, REVERSED, REFUNDED, EXPIRED]
+    required: true
+
+  - name: failure_reason
+    type: string
+    description: RBI error code and description on failure
+
+  - name: failure_code
+    type: string
+    description: NPCI/RBI standard error code
+
+  - name: balance_before
+    type: decimal
+    required: true
+    description: Account balance before this transaction - audit requirement
+
+  - name: balance_after
+    type: decimal
+    required: true
+    description: Account balance after this transaction - audit requirement
+
+  - name: description
+    type: string
+    description: Narration shown on statement
+
+  - name: merchant_category_code
+    type: string
+    description: MCC for card transactions
+
+  - name: initiated_by
+    type: uuid
+    description: Customer or staff who initiated
+
+  - name: approved_by
+    type: uuid
+    description: Staff who approved - for high value
+
+  - name: initiated_at
+    type: datetime
+    required: true
+
+  - name: processed_at
+    type: datetime
+
+  - name: value_date
+    type: date
+    description: Effective date for interest calculation
+
+  - name: batch_id
+    type: uuid
+    foreign_key: BatchJob.batch_id
+    description: For NEFT batch processing
+
+  - name: reversal_of
+    type: uuid
+    foreign_key: Transaction.transaction_id
+    description: Points to original transaction if this is reversal
+
+  - name: is_flagged
+    type: boolean
+    default: false
+    description: Flagged by fraud detection
+
+  - name: fraud_alert_id
+    type: uuid
+    foreign_key: FraudAlert.alert_id
+
+  - name: created_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: Beneficiary
+  description: Saved payees with RBI 24h cooldown enforcement
+
+fields:
+  - name: beneficiary_id
+    type: uuid
+    required: true
+    primary_key: true
+
+  - name: customer_id
+    type: uuid
+    required: true
+    foreign_key: Customer.customer_id
+
+  - name: nickname
+    type: string
+
+  - name: beneficiary_name
+    type: string
+    required: true
+    pii: sensitive
+
+  - name: bank_name
+    type: string
+    required: true
+
+  - name: ifsc_code
+    type: string
+    required: true
+
+  - name: account_number
+    type: string
+    required: true
+    pii: restricted
+
+  - name: account_type
+    type: enum
+    values: [SAVINGS, CURRENT]
+    required: true
+
+  - name: mobile_number
+    type: string
+    pii: restricted
+    description: For UPI VPA resolution
+
+  - name: upi_vpa
+    type: string
+    description: UPI Virtual Payment Address
+
+  - name: is_verified
+    type: boolean
+    default: false
+    description: Penny drop verification status
+
+  - name: verified_at
+    type: datetime
+
+  - name: cooldown_until
+    type: datetime
+    required: true
+    description: RBI 24h mandatory cooldown - no transfers until this time
+
+  - name: max_transfer_limit
+    type: decimal
+    description: Customer-set limit per transaction
+
+  - name: is_active
+    type: boolean
+    default: true
+
+  - name: added_via
+    type: enum
+    values: [MOBILE_APP, NET_BANKING, BRANCH, API]
+
+  - name: created_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: KYCDocument
+  description: KYC document verification records - RBI KYC Master Directions 2016
+
+fields:
+  - name: document_id
+    type: uuid
+    required: true
+    primary_key: true
+
+  - name: customer_id
+    type: uuid
+    required: true
+    foreign_key: Customer.customer_id
+
+  - name: document_type
+    type: enum
+    values: [AADHAAR, PAN, PASSPORT, VOTER_ID, DRIVING_LICENSE, UTILITY_BILL, SALARY_SLIP, ITR]
+    required: true
+
+  - name: document_number
+    type: string
+    required: true
+    pii: restricted
+
+  - name: document_hash
+    type: string
+    required: true
+    description: SHA-256 hash of document file
+
+  - name: issuing_authority
+    type: string
+    required: true
+
+  - name: issue_date
+    type: date
+
+  - name: expiry_date
+    type: date
+
+  - name: verification_status
+    type: enum
+    values: [PENDING, UNDER_REVIEW, VERIFIED, REJECTED, EXPIRED]
+    required: true
+
+  - name: verification_method
+    type: enum
+    values: [MANUAL, AADHAAR_OTP, DIGILOCKER, VIDEO_KYC, IN_PERSON]
+
+  - name: verified_by
+    type: uuid
+    foreign_key: Staff.staff_id
+
+  - name: verified_at
+    type: datetime
+
+  - name: rejection_reason
+    type: string
+
+  - name: file_path
+    type: string
+    description: Encrypted S3/MinIO path
+
+  - name: file_size_bytes
+    type: integer
+
+  - name: is_primary
+    type: boolean
+    default: false
+    description: Primary OVD document per RBI norms
+
+  - name: created_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: AuditLog
+  description: Immutable audit trail - RBI BANK-AUDIT-001 compliance
+
+fields:
+  - name: audit_id
+    type: uuid
+    required: true
+    primary_key: true
+
+  - name: entity_type
+    type: string
+    required: true
+    description: Table name - Customer, Account, Transaction etc
+
+  - name: entity_id
+    type: uuid
+    required: true
+    description: Primary key of the audited record
+
+  - name: action
+    type: enum
+    values: [CREATE, READ, UPDATE, DELETE, LOGIN, LOGOUT, EXPORT, FREEZE, UNFREEZE]
+    required: true
+
+  - name: old_value
+    type: json
+    description: Previous state - null for CREATE
+
+  - name: new_value
+    type: json
+    description: New state - null for DELETE
+
+  - name: changed_fields
+    type: json
+    description: List of field names that changed
+
+  - name: performed_by
+    type: uuid
+    required: true
+
+  - name: performed_by_role
+    type: string
+    required: true
+
+  - name: ip_address
+    type: string
+
+  - name: user_agent
+    type: string
+
+  - name: session_id
+    type: string
+
+  - name: timestamp
+    type: datetime
+    required: true
+
+  - name: is_suspicious
+    type: boolean
+    default: false
+
+---
+entity:
+  name: FraudAlert
+  description: Real-time fraud detection alerts
+
+fields:
+  - name: alert_id
+    type: uuid
+    required: true
+    primary_key: true
+
+  - name: transaction_id
+    type: uuid
+    foreign_key: Transaction.transaction_id
+
+  - name: customer_id
+    type: uuid
+    required: true
+    foreign_key: Customer.customer_id
+
+  - name: alert_type
+    type: enum
+    values: [VELOCITY_BREACH, UNUSUAL_LOCATION, HIGH_VALUE, MULTIPLE_FAILURES, PATTERN_MISMATCH, BLACKLIST_MATCH]
+    required: true
+
+  - name: severity
+    type: enum
+    values: [LOW, MEDIUM, HIGH, CRITICAL]
+    required: true
+
+  - name: risk_score
+    type: decimal
+    description: ML model risk score 0.0 to 1.0
+
+  - name: rule_triggered
+    type: string
+    description: Which fraud rule fired
+
+  - name: status
+    type: enum
+    values: [OPEN, UNDER_REVIEW, RESOLVED, FALSE_POSITIVE, ESCALATED]
+    required: true
+
+  - name: resolution_note
+    type: string
+
+  - name: resolved_by
+    type: uuid
+
+  - name: resolved_at
+    type: datetime
+
+  - name: created_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: RBIReport
+  description: Regulatory reporting to RBI - mandatory submissions
+
+fields:
+  - name: report_id
+    type: uuid
+    required: true
+    primary_key: true
+
+  - name: report_type
+    type: enum
+    values: [SUSPICIOUS_TRANSACTION, CASH_TRANSACTION_ABOVE_10L, COUNTERFEIT_CURRENCY, HIGH_VALUE_TRANSFER, QUARTERLY_RETURN, ANNUAL_RETURN]
+    required: true
+
+  - name: reporting_period_start
+    type: date
+    required: true
+
+  - name: reporting_period_end
+    type: date
+    required: true
+
+  - name: transaction_count
+    type: integer
+
+  - name: total_amount
+    type: decimal
+
+  - name: submission_status
+    type: enum
+    values: [DRAFT, PENDING_REVIEW, SUBMITTED, ACKNOWLEDGED, REJECTED, RESUBMITTED]
+    required: true
+
+  - name: submitted_at
+    type: datetime
+
+  - name: submitted_by
+    type: uuid
+
+  - name: rbi_acknowledgement_number
+    type: string
+    description: ACK number from RBI portal
+
+  - name: rejection_reason
+    type: string
+
+  - name: file_path
+    type: string
+    description: Report file path in MinIO
+
+  - name: created_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: BatchJob
+  description: NEFT and bulk payment batch processing
+
+fields:
+  - name: batch_id
+    type: uuid
+    required: true
+    primary_key: true
+
+  - name: batch_type
+    type: enum
+    values: [NEFT, INTEREST_CREDIT, STANDING_INSTRUCTION, STATEMENT_GENERATION, DORMANCY_CHECK]
+    required: true
+
+  - name: scheduled_at
+    type: datetime
+    required: true
+
+  - name: started_at
+    type: datetime
+
+  - name: completed_at
+    type: datetime
+
+  - name: status
+    type: enum
+    values: [SCHEDULED, RUNNING, COMPLETED, FAILED, PARTIAL]
+    required: true
+
+  - name: total_records
+    type: integer
+
+  - name: processed_records
+    type: integer
+
+  - name: failed_records
+    type: integer
+
+  - name: total_amount
+    type: decimal
+
+  - name: error_log
+    type: string
+
+  - name: created_by
+    type: uuid
+    required: true

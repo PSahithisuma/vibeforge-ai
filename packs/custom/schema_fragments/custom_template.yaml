@@ -1,0 +1,191 @@
+# CUSTOM DOMAIN PACK TEMPLATE
+# Replace all placeholder values with your domain-specific entities
+# The platform will generate a complete Spring Boot application from this schema
+
+entity:
+  name: CoreEntity
+  description: Primary business entity - replace with your domain object
+
+fields:
+  - name: entity_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: reference_code
+    type: string
+    required: true
+    unique: true
+    description: Human-readable business identifier
+  - name: name
+    type: string
+    required: true
+  - name: status
+    type: enum
+    values: [ACTIVE, INACTIVE, PENDING, ARCHIVED]
+    required: true
+  - name: owner_id
+    type: uuid
+    foreign_key: User.user_id
+  - name: metadata
+    type: json
+    description: Flexible schema for domain-specific attributes
+  - name: tags
+    type: json
+    description: Searchable labels
+  - name: created_at
+    type: datetime
+    required: true
+  - name: updated_at
+    type: datetime
+    required: true
+  - name: created_by
+    type: uuid
+    required: true
+
+---
+entity:
+  name: User
+  description: Platform user with role-based access
+
+fields:
+  - name: user_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: email
+    type: string
+    required: true
+    unique: true
+    pii: sensitive
+  - name: first_name
+    type: string
+    required: true
+    pii: sensitive
+  - name: last_name
+    type: string
+    required: true
+    pii: sensitive
+  - name: role
+    type: enum
+    values: [SUPER_ADMIN, ADMIN, MANAGER, OPERATOR, VIEWER]
+    required: true
+  - name: department
+    type: string
+  - name: is_active
+    type: boolean
+    default: true
+  - name: last_login_at
+    type: datetime
+  - name: created_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: WorkflowInstance
+  description: Business process workflow tracking
+
+fields:
+  - name: instance_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: entity_id
+    type: uuid
+    required: true
+    foreign_key: CoreEntity.entity_id
+  - name: workflow_type
+    type: string
+    required: true
+  - name: current_stage
+    type: string
+    required: true
+  - name: status
+    type: enum
+    values: [INITIATED, IN_PROGRESS, PENDING_APPROVAL, APPROVED, REJECTED, COMPLETED, CANCELLED]
+    required: true
+  - name: assigned_to
+    type: uuid
+    foreign_key: User.user_id
+  - name: due_at
+    type: datetime
+  - name: completed_at
+    type: datetime
+  - name: notes
+    type: string
+  - name: created_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: AuditLog
+  description: Immutable audit trail for compliance
+
+fields:
+  - name: audit_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: entity_type
+    type: string
+    required: true
+  - name: entity_id
+    type: uuid
+    required: true
+  - name: action
+    type: enum
+    values: [CREATE, READ, UPDATE, DELETE, APPROVE, REJECT, EXPORT]
+    required: true
+  - name: old_value
+    type: json
+  - name: new_value
+    type: json
+  - name: performed_by
+    type: uuid
+    required: true
+  - name: ip_address
+    type: string
+  - name: timestamp
+    type: datetime
+    required: true
+
+---
+entity:
+  name: Notification
+  description: Multi-channel notification management
+
+fields:
+  - name: notification_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: recipient_id
+    type: uuid
+    required: true
+    foreign_key: User.user_id
+  - name: channel
+    type: enum
+    values: [EMAIL, SMS, PUSH, IN_APP, WEBHOOK]
+    required: true
+  - name: template_id
+    type: string
+    required: true
+  - name: subject
+    type: string
+  - name: body
+    type: string
+    required: true
+  - name: status
+    type: enum
+    values: [QUEUED, SENT, DELIVERED, FAILED, BOUNCED]
+    required: true
+  - name: sent_at
+    type: datetime
+  - name: delivered_at
+    type: datetime
+  - name: failure_reason
+    type: string
+  - name: created_at
+    type: datetime
+    required: true

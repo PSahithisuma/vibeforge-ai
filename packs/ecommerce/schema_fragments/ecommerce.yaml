@@ -1,0 +1,514 @@
+entity:
+  name: Customer
+  description: E-commerce customer with GDPR compliance
+
+fields:
+  - name: customer_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: email
+    type: string
+    required: true
+    unique: true
+    pii: sensitive
+  - name: phone
+    type: string
+    pii: sensitive
+  - name: first_name
+    type: string
+    required: true
+    pii: sensitive
+  - name: last_name
+    type: string
+    required: true
+    pii: sensitive
+  - name: date_of_birth
+    type: date
+    pii: sensitive
+  - name: gender
+    type: enum
+    values: [MALE, FEMALE, OTHER, PREFER_NOT_TO_SAY]
+  - name: status
+    type: enum
+    values: [ACTIVE, SUSPENDED, DEACTIVATED, GDPR_ERASED]
+    required: true
+  - name: email_verified
+    type: boolean
+    default: false
+  - name: phone_verified
+    type: boolean
+    default: false
+  - name: marketing_consent
+    type: boolean
+    default: false
+    description: GDPR explicit consent for marketing
+  - name: data_processing_consent
+    type: boolean
+    required: true
+    description: GDPR lawful basis consent
+  - name: consent_recorded_at
+    type: datetime
+    required: true
+  - name: gdpr_erasure_requested_at
+    type: datetime
+  - name: loyalty_points
+    type: integer
+    default: 0
+  - name: tier
+    type: enum
+    values: [BRONZE, SILVER, GOLD, PLATINUM]
+    default: BRONZE
+  - name: created_at
+    type: datetime
+    required: true
+  - name: updated_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: Address
+  description: Customer shipping and billing addresses
+
+fields:
+  - name: address_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: customer_id
+    type: uuid
+    required: true
+    foreign_key: Customer.customer_id
+  - name: address_type
+    type: enum
+    values: [HOME, OFFICE, BILLING, SHIPPING]
+    required: true
+  - name: line1
+    type: string
+    required: true
+    pii: sensitive
+  - name: line2
+    type: string
+    pii: sensitive
+  - name: city
+    type: string
+    required: true
+  - name: state
+    type: string
+    required: true
+  - name: country
+    type: string
+    required: true
+    default: IN
+  - name: pin_code
+    type: string
+    required: true
+  - name: is_default
+    type: boolean
+    default: false
+  - name: created_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: Category
+  description: Product category hierarchy
+
+fields:
+  - name: category_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: name
+    type: string
+    required: true
+  - name: slug
+    type: string
+    required: true
+    unique: true
+  - name: parent_category_id
+    type: uuid
+    foreign_key: Category.category_id
+    description: Self-referencing for hierarchy
+  - name: description
+    type: string
+  - name: image_url
+    type: string
+  - name: is_active
+    type: boolean
+    default: true
+  - name: display_order
+    type: integer
+    default: 0
+  - name: meta_title
+    type: string
+  - name: meta_description
+    type: string
+  - name: created_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: Product
+  description: Product catalog with full inventory management
+
+fields:
+  - name: product_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: sku
+    type: string
+    required: true
+    unique: true
+    description: Stock Keeping Unit
+  - name: name
+    type: string
+    required: true
+  - name: slug
+    type: string
+    required: true
+    unique: true
+  - name: description
+    type: string
+  - name: category_id
+    type: uuid
+    required: true
+    foreign_key: Category.category_id
+  - name: brand_id
+    type: uuid
+    foreign_key: Brand.brand_id
+  - name: base_price
+    type: decimal
+    required: true
+    precision: 18
+    scale: 2
+  - name: selling_price
+    type: decimal
+    required: true
+    precision: 18
+    scale: 2
+  - name: discount_percentage
+    type: decimal
+    default: 0
+  - name: tax_rate
+    type: decimal
+    required: true
+    description: GST rate applicable
+  - name: hsn_code
+    type: string
+    description: HSN code for GST compliance
+  - name: weight_grams
+    type: integer
+  - name: status
+    type: enum
+    values: [ACTIVE, INACTIVE, OUT_OF_STOCK, DISCONTINUED, DRAFT]
+    required: true
+  - name: is_returnable
+    type: boolean
+    default: true
+  - name: return_window_days
+    type: integer
+    default: 7
+  - name: warranty_months
+    type: integer
+    default: 0
+  - name: country_of_origin
+    type: string
+  - name: created_at
+    type: datetime
+    required: true
+  - name: updated_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: Inventory
+  description: Real-time stock management per warehouse
+
+fields:
+  - name: inventory_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: product_id
+    type: uuid
+    required: true
+    foreign_key: Product.product_id
+  - name: warehouse_id
+    type: uuid
+    required: true
+    foreign_key: Warehouse.warehouse_id
+  - name: quantity_available
+    type: integer
+    required: true
+    default: 0
+  - name: quantity_reserved
+    type: integer
+    default: 0
+    description: Held for pending orders
+  - name: quantity_damaged
+    type: integer
+    default: 0
+  - name: reorder_level
+    type: integer
+    description: Trigger restock when below this
+  - name: reorder_quantity
+    type: integer
+  - name: last_restocked_at
+    type: datetime
+  - name: updated_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: Cart
+  description: Shopping cart with session management
+
+fields:
+  - name: cart_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: customer_id
+    type: uuid
+    foreign_key: Customer.customer_id
+  - name: session_id
+    type: string
+    description: For guest carts
+  - name: status
+    type: enum
+    values: [ACTIVE, CONVERTED, ABANDONED, EXPIRED]
+    required: true
+  - name: coupon_code
+    type: string
+  - name: discount_amount
+    type: decimal
+    default: 0
+  - name: subtotal
+    type: decimal
+    required: true
+  - name: tax_amount
+    type: decimal
+    required: true
+  - name: shipping_charge
+    type: decimal
+    default: 0
+  - name: total_amount
+    type: decimal
+    required: true
+  - name: expires_at
+    type: datetime
+  - name: created_at
+    type: datetime
+    required: true
+  - name: updated_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: CartItem
+  description: Individual items in a cart
+
+fields:
+  - name: cart_item_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: cart_id
+    type: uuid
+    required: true
+    foreign_key: Cart.cart_id
+  - name: product_id
+    type: uuid
+    required: true
+    foreign_key: Product.product_id
+  - name: quantity
+    type: integer
+    required: true
+  - name: unit_price
+    type: decimal
+    required: true
+    description: Price at time of adding to cart
+  - name: discount_amount
+    type: decimal
+    default: 0
+  - name: added_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: Order
+  description: Customer order with full lifecycle tracking
+
+fields:
+  - name: order_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: order_number
+    type: string
+    required: true
+    unique: true
+  - name: customer_id
+    type: uuid
+    required: true
+    foreign_key: Customer.customer_id
+  - name: cart_id
+    type: uuid
+    foreign_key: Cart.cart_id
+  - name: shipping_address_id
+    type: uuid
+    required: true
+    foreign_key: Address.address_id
+  - name: billing_address_id
+    type: uuid
+    required: true
+    foreign_key: Address.address_id
+  - name: status
+    type: enum
+    values: [PENDING, CONFIRMED, PROCESSING, PACKED, SHIPPED, OUT_FOR_DELIVERY, DELIVERED, CANCELLED, RETURN_REQUESTED, RETURNED, REFUNDED]
+    required: true
+  - name: subtotal
+    type: decimal
+    required: true
+  - name: discount_amount
+    type: decimal
+    default: 0
+  - name: tax_amount
+    type: decimal
+    required: true
+  - name: shipping_charge
+    type: decimal
+    default: 0
+  - name: total_amount
+    type: decimal
+    required: true
+  - name: coupon_code
+    type: string
+  - name: payment_status
+    type: enum
+    values: [PENDING, PAID, PARTIALLY_REFUNDED, REFUNDED, FAILED]
+    required: true
+  - name: payment_method
+    type: enum
+    values: [UPI, CARD, NETBANKING, WALLET, COD, EMI]
+  - name: notes
+    type: string
+  - name: placed_at
+    type: datetime
+    required: true
+  - name: confirmed_at
+    type: datetime
+  - name: delivered_at
+    type: datetime
+  - name: cancelled_at
+    type: datetime
+  - name: cancellation_reason
+    type: string
+  - name: created_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: Payment
+  description: Payment transaction records with gateway integration
+
+fields:
+  - name: payment_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: order_id
+    type: uuid
+    required: true
+    foreign_key: Order.order_id
+  - name: customer_id
+    type: uuid
+    required: true
+    foreign_key: Customer.customer_id
+  - name: amount
+    type: decimal
+    required: true
+  - name: currency
+    type: string
+    default: INR
+  - name: payment_method
+    type: enum
+    values: [UPI, CARD, NETBANKING, WALLET, COD, EMI]
+    required: true
+  - name: gateway
+    type: enum
+    values: [RAZORPAY, PAYU, STRIPE, CASHFREE, PHONEPE]
+  - name: gateway_transaction_id
+    type: string
+  - name: gateway_order_id
+    type: string
+  - name: status
+    type: enum
+    values: [INITIATED, PENDING, SUCCESS, FAILED, REFUNDED, PARTIALLY_REFUNDED]
+    required: true
+  - name: failure_reason
+    type: string
+  - name: refund_amount
+    type: decimal
+    default: 0
+  - name: refunded_at
+    type: datetime
+  - name: initiated_at
+    type: datetime
+    required: true
+  - name: completed_at
+    type: datetime
+
+---
+entity:
+  name: Review
+  description: Product reviews and ratings
+
+fields:
+  - name: review_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: product_id
+    type: uuid
+    required: true
+    foreign_key: Product.product_id
+  - name: customer_id
+    type: uuid
+    required: true
+    foreign_key: Customer.customer_id
+  - name: order_id
+    type: uuid
+    foreign_key: Order.order_id
+    description: Verified purchase link
+  - name: rating
+    type: integer
+    required: true
+    description: 1 to 5 stars
+  - name: title
+    type: string
+  - name: body
+    type: string
+  - name: status
+    type: enum
+    values: [PENDING, APPROVED, REJECTED, FLAGGED]
+    required: true
+  - name: is_verified_purchase
+    type: boolean
+    default: false
+  - name: helpful_count
+    type: integer
+    default: 0
+  - name: created_at
+    type: datetime
+    required: true

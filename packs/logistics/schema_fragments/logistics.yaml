@@ -1,0 +1,398 @@
+entity:
+  name: Shipper
+  description: Company or individual shipping goods
+
+fields:
+  - name: shipper_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: company_name
+    type: string
+    required: true
+  - name: gstin
+    type: string
+    description: GST registration number
+  - name: pan_number
+    type: string
+    pii: restricted
+  - name: contact_person
+    type: string
+    required: true
+  - name: email
+    type: string
+    required: true
+    pii: sensitive
+  - name: phone
+    type: string
+    required: true
+    pii: sensitive
+  - name: address_line1
+    type: string
+    required: true
+  - name: city
+    type: string
+    required: true
+  - name: state
+    type: string
+    required: true
+  - name: pin_code
+    type: string
+    required: true
+  - name: credit_limit
+    type: decimal
+    default: 0
+  - name: outstanding_amount
+    type: decimal
+    default: 0
+  - name: is_active
+    type: boolean
+    default: true
+  - name: created_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: Shipment
+  description: Core shipment record with full tracking lifecycle
+
+fields:
+  - name: shipment_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: awb_number
+    type: string
+    required: true
+    unique: true
+    description: Air Waybill - unique tracking number
+  - name: shipper_id
+    type: uuid
+    required: true
+    foreign_key: Shipper.shipper_id
+  - name: consignee_name
+    type: string
+    required: true
+    pii: sensitive
+  - name: consignee_phone
+    type: string
+    required: true
+    pii: sensitive
+  - name: consignee_email
+    type: string
+    pii: sensitive
+  - name: origin_address
+    type: string
+    required: true
+  - name: origin_city
+    type: string
+    required: true
+  - name: origin_pin
+    type: string
+    required: true
+  - name: destination_address
+    type: string
+    required: true
+  - name: destination_city
+    type: string
+    required: true
+  - name: destination_pin
+    type: string
+    required: true
+  - name: service_type
+    type: enum
+    values: [STANDARD, EXPRESS, SAME_DAY, NEXT_DAY, ECONOMY, HYPERLOCAL]
+    required: true
+  - name: shipment_type
+    type: enum
+    values: [FORWARD, REVERSE, EXCHANGE]
+    required: true
+  - name: status
+    type: enum
+    values: [BOOKED, PICKED_UP, IN_TRANSIT, OUT_FOR_DELIVERY, DELIVERED, FAILED_DELIVERY, RETURNED, LOST, DAMAGED]
+    required: true
+  - name: weight_grams
+    type: integer
+    required: true
+  - name: length_cm
+    type: decimal
+  - name: width_cm
+    type: decimal
+  - name: height_cm
+    type: decimal
+  - name: declared_value
+    type: decimal
+    required: true
+    description: Insurance value of goods
+  - name: cod_amount
+    type: decimal
+    default: 0
+    description: Cash on delivery amount
+  - name: is_cod
+    type: boolean
+    default: false
+  - name: is_fragile
+    type: boolean
+    default: false
+  - name: requires_signature
+    type: boolean
+    default: false
+  - name: carrier_id
+    type: uuid
+    foreign_key: Carrier.carrier_id
+  - name: vehicle_id
+    type: uuid
+    foreign_key: Vehicle.vehicle_id
+  - name: driver_id
+    type: uuid
+    foreign_key: Driver.driver_id
+  - name: route_id
+    type: uuid
+    foreign_key: Route.route_id
+  - name: estimated_delivery_at
+    type: datetime
+  - name: actual_delivery_at
+    type: datetime
+  - name: delivery_otp
+    type: string
+    description: OTP for proof of delivery
+  - name: delivery_signature_url
+    type: string
+  - name: delivery_photo_url
+    type: string
+  - name: failure_reason
+    type: string
+  - name: attempt_count
+    type: integer
+    default: 0
+  - name: next_attempt_at
+    type: datetime
+  - name: booked_at
+    type: datetime
+    required: true
+  - name: created_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: TrackingEvent
+  description: Real-time shipment tracking events
+
+fields:
+  - name: event_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: shipment_id
+    type: uuid
+    required: true
+    foreign_key: Shipment.shipment_id
+  - name: event_type
+    type: enum
+    values: [BOOKED, PICKED_UP, ARRIVED_AT_HUB, DEPARTED_HUB, OUT_FOR_DELIVERY, DELIVERED, DELIVERY_FAILED, RETURNED_TO_ORIGIN, LOST_IN_TRANSIT, DAMAGED]
+    required: true
+  - name: location_name
+    type: string
+    required: true
+  - name: city
+    type: string
+  - name: latitude
+    type: decimal
+  - name: longitude
+    type: decimal
+  - name: remarks
+    type: string
+  - name: recorded_by
+    type: uuid
+    foreign_key: Driver.driver_id
+  - name: event_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: Vehicle
+  description: Fleet vehicle management
+
+fields:
+  - name: vehicle_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: registration_number
+    type: string
+    required: true
+    unique: true
+  - name: vehicle_type
+    type: enum
+    values: [TWO_WHEELER, THREE_WHEELER, FOUR_WHEELER, MINI_TRUCK, TRUCK, CONTAINER]
+    required: true
+  - name: carrier_id
+    type: uuid
+    required: true
+    foreign_key: Carrier.carrier_id
+  - name: driver_id
+    type: uuid
+    foreign_key: Driver.driver_id
+  - name: capacity_kg
+    type: decimal
+    required: true
+  - name: capacity_cubic_ft
+    type: decimal
+  - name: fuel_type
+    type: enum
+    values: [PETROL, DIESEL, CNG, ELECTRIC]
+  - name: status
+    type: enum
+    values: [AVAILABLE, ON_ROUTE, MAINTENANCE, INACTIVE]
+    required: true
+  - name: current_latitude
+    type: decimal
+  - name: current_longitude
+    type: decimal
+  - name: last_location_updated_at
+    type: datetime
+  - name: insurance_expiry
+    type: date
+  - name: permit_expiry
+    type: date
+  - name: fitness_expiry
+    type: date
+  - name: created_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: Driver
+  description: Delivery driver profiles and compliance
+
+fields:
+  - name: driver_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: carrier_id
+    type: uuid
+    required: true
+    foreign_key: Carrier.carrier_id
+  - name: employee_code
+    type: string
+    required: true
+    unique: true
+  - name: first_name
+    type: string
+    required: true
+    pii: sensitive
+  - name: last_name
+    type: string
+    required: true
+    pii: sensitive
+  - name: phone
+    type: string
+    required: true
+    pii: sensitive
+  - name: aadhaar_hash
+    type: string
+    pii: restricted
+  - name: license_number
+    type: string
+    required: true
+    pii: restricted
+  - name: license_expiry
+    type: date
+    required: true
+  - name: status
+    type: enum
+    values: [ACTIVE, ON_LEAVE, SUSPENDED, TERMINATED]
+    required: true
+  - name: current_shipments_count
+    type: integer
+    default: 0
+  - name: total_deliveries
+    type: integer
+    default: 0
+  - name: success_rate
+    type: decimal
+    description: Percentage of successful first-attempt deliveries
+  - name: created_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: Route
+  description: Optimised delivery routes
+
+fields:
+  - name: route_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: route_code
+    type: string
+    required: true
+    unique: true
+  - name: origin_hub_id
+    type: uuid
+    foreign_key: Warehouse.warehouse_id
+  - name: destination_hub_id
+    type: uuid
+    foreign_key: Warehouse.warehouse_id
+  - name: distance_km
+    type: decimal
+  - name: estimated_transit_hours
+    type: integer
+  - name: vehicle_type_required
+    type: enum
+    values: [TWO_WHEELER, THREE_WHEELER, FOUR_WHEELER, MINI_TRUCK, TRUCK]
+  - name: is_active
+    type: boolean
+    default: true
+  - name: created_at
+    type: datetime
+    required: true
+
+---
+entity:
+  name: Warehouse
+  description: Hub and warehouse master data
+
+fields:
+  - name: warehouse_id
+    type: uuid
+    required: true
+    primary_key: true
+  - name: warehouse_code
+    type: string
+    required: true
+    unique: true
+  - name: name
+    type: string
+    required: true
+  - name: type
+    type: enum
+    values: [ORIGIN_HUB, TRANSIT_HUB, DELIVERY_HUB, DARK_STORE, FULFILMENT_CENTRE]
+    required: true
+  - name: address
+    type: string
+    required: true
+  - name: city
+    type: string
+    required: true
+  - name: state
+    type: string
+    required: true
+  - name: pin_code
+    type: string
+    required: true
+  - name: capacity_sqft
+    type: decimal
+  - name: is_active
+    type: boolean
+    default: true
+  - name: created_at
+    type: datetime
+    required: true
